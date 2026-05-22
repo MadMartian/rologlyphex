@@ -1,0 +1,16 @@
+[package]
+name = "rologlyphex"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gtk4 = { version = "0.9", features = ["v4_6"] }
+gdk4 = { version = "0.9", features = ["v4_6"] }
+glib = "0.20"
+cairo-rs = "0.20"
+notify = "6.1"
+libc = "0.2"
+x11 = { version = "2.21", features = ["xlib", "xtest"] }
+dbus = "0.9"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"

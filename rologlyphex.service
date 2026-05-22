@@ -1,0 +1,16 @@
+[Unit]
+Description=Rologlyphex - Macropad Layout Overlay
+After=keyd.service
+Wants=keyd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/rologlyphex --config /etc/keyd/macropad.conf
+SupplementaryGroups=keyd
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=graphical-session.target
