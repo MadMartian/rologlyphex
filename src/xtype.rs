@@ -6,7 +6,7 @@ use crate::debug_log;
 
 /// Persistent X11 connection for typing characters via XTest.
 /// Characters are typed via keyboard remapping + XTest key synthesis.
-/// See sdd/PLAN.non-BMP.md for planned non-BMP character support.
+/// Non-BMP character support is a known limitation; see sdd/ISSUES.md entry D.
 pub struct XTyper {
     display: *mut xlib::Display,
     cache: HashMap<xlib::KeySym, u8>,

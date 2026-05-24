@@ -72,7 +72,7 @@ Coding, functional, and behavioural anti-patterns encountered during development
 
 **Root cause**: Terminal emulators interpret Ctrl+V as "insert next character literally" (a readline/VT convention), not as "paste from clipboard." This is fundamental to how terminals work and cannot be detected or worked around at the X11 level.
 
-**Resolution**: Reverted the non-BMP clipboard gate. All characters now use the keysym remap path. Clipboard code was eventually removed entirely (shelved in git history, documented in `sdd/PLAN.non-BMP.md`).
+**Resolution**: Reverted the non-BMP clipboard gate. All characters now use the keysym remap path. Clipboard code was eventually removed entirely (shelved in git history; see `sdd/ISSUES.md` entry D for full investigation notes).
 
 **Lesson**: Ctrl+V is not a universal paste operation. Before building a clipboard-based input mechanism, verify it works in ALL target application types (GUI editors, terminals, IDEs, browsers). Test terminals early — they are the most likely to break.
 

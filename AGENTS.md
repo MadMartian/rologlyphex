@@ -22,4 +22,3 @@ Read all of the above, plus:
 ### Additional documents (read when relevant)
 
 - `sdd/ISSUES.md` — Known unresolved issues (read when investigating bugs or unexpected behavior)
-- `sdd/PLAN.non-BMP.md` — Deferred technical plan for non-BMP character support
