@@ -1,6 +1,6 @@
 [Unit]
 Description=Rologlyphex - Macropad Layout Overlay
-After=keyd.service
+After=graphical-session.target keyd.service
 Wants=keyd.service
 
 [Service]
