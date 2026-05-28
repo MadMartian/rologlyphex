@@ -38,7 +38,7 @@ impl XTyper {
         let mut free_keycodes = Vec::new();
         let mut cache = HashMap::new();
 
-        for kc in (min_kc..=max_kc).rev() {
+        for kc in min_kc..=max_kc {
             let mut keysyms_per_kc: i32 = 0;
             let mapping = unsafe {
                 xlib::XGetKeyboardMapping(display, kc as u8, 1, &mut keysyms_per_kc)
@@ -53,7 +53,7 @@ impl XTyper {
 
             if all_empty {
                 free_keycodes.push(kc as u8);
-            } else if first_sym >= 0x01000000 {
+            } else if first_sym >= 0x01000000 && first_sym <= 0x0110FFFF {
                 // Reclaim keycode previously mapped by rologlyphex — pre-populate
                 // cache so this keysym is found instantly without a new mapping slot.
                 cache.insert(first_sym, kc as u8);

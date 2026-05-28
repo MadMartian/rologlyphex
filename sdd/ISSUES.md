@@ -17,7 +17,7 @@ With ~50 free keycodes and ~15 characters per session, exhaustion would require 
 
 **Mitigation options**:
 - Restore remapped keycodes to `NoSymbol` in `XTyper::drop()` (trades startup performance on next run)
-- Scan existing mappings at startup and reclaim keycodes that already have our keysyms
+- Scan existing mappings at startup and reclaim keycodes that already have our keysyms (Implemented in `XTyper::open()`)
 - Accept the limitation and document it
 
 ## B. 100ms polling latency

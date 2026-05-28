@@ -6,7 +6,7 @@
 | 2 | Config parsing | 2.1 – 2.15 |
 | 3 | keyd IPC | 3.1 – 3.5 |
 | 4 | Overlay window | 4.1 – 4.10 |
-| 5 | Unicode input synthesis | 5.1 – 5.5 |
+| 5 | Unicode input synthesis | 5.1 – 5.7 |
 | 6 | Socket IPC | 6.1 – 6.7 |
 | 7 | Config hot reload | 7.1 – 7.3 |
 
@@ -255,6 +255,16 @@
 - **Given** a text editor has focus
 - **When** `rologlyphex type →` is invoked
 - **Then** "→" appears at the cursor position in the text editor
+
+### 5.6 High keycodes preferred for remapping
+- **Given** the daemon starts with a pool of free keycodes
+- **When** a character requires remapping via `XChangeKeyboardMapping`
+- **Then** a keycode near `max_kc` (e.g., 255) is used, not one near `min_kc` (e.g., 8)
+
+### 5.7 Only valid Unicode keysyms are reclaimed at startup
+- **Given** the X server has keycodes mapped to both Unicode keysyms (0x01000000–0x0110FFFF) and vendor keysyms (e.g., XF86 multimedia keys above 0x0110FFFF)
+- **When** the daemon starts and scans existing mappings
+- **Then** only Unicode keysyms are reclaimed into the cache; vendor/multimedia keysyms are not reclaimed
 
 ## 6. Socket IPC
 

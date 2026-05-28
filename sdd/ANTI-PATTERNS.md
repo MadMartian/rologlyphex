@@ -16,6 +16,8 @@ Coding, functional, and behavioural anti-patterns encountered during development
 | 10 | idle_add_local_once race on first window map causes focus steal |
 | 11 | Pre-filtering CLI arguments |
 | 12 | `SupplementaryGroups` in a systemd user service fails with "Operation not permitted" |
+| 13 | Low X11 keycodes (near min_kc) silently swallow XTest key events |
+| 14 | Multimedia keysyms falsely reclaimed as rologlyphex emoji mappings |
 
 ## 1. GTK4 layout timing: measuring before layout
 
@@ -181,3 +183,28 @@ Coding, functional, and behavioural anti-patterns encountered during development
 **Resolution**: Removed `SupplementaryGroups=keyd` from the service file. The user service inherits whatever groups the user has at login. The user must be in the `keyd` group at the OS level (`sudo usermod -aG keyd $USER`, then log out and back in). After that, the service inherits the group without any special directive.
 
 **Lesson**: Never use `SupplementaryGroups` in a systemd user service — it will always fail. Group membership for user services must come from the user's login session. For keyd group access, `usermod -aG keyd $USER` + re-login is the only correct path.
+
+## 13. Low X11 keycodes (near min_kc) silently swallow XTest key events
+
+**Symptom**: A specific emoji (😬, U+1F62C) never appeared when typed — pressing the button produced no output. Sibling emoji (😐, 😨) in the same layer worked correctly.
+
+**What was tried**:
+- Verified UTF-8 encoding in config file (correct)
+- Verified socket path discovery (correct — other emoji worked)
+- Verified `unicode_to_keysym()` output (correct keysym 0x1001F62C)
+
+**Root cause**: `XTyper::open()` scanned keycodes from `max_kc` down to `min_kc` (`.rev()`) and pushed free keycodes in that order — so the Vec was `[max_free, ..., min_free]`. `remap_and_type()` used `last()`, which yielded `min_free` (typically keycode 8 on Linux/evdev). Keycode 8 is X11's minimum valid keycode and while it appears free (all NoSymbol), `XTestFakeKeyEvent` with keycode 8 is silently ignored by the X server. The other emoji (😐, 😨) had been mapped in a previous daemon session and were reclaimed into the cache at startup — they never went through `remap_and_type`. 😬 had never been mapped, so it fell through to `remap_and_type` and received keycode 8.
+
+**Resolution**: Changed the iteration from `(min_kc..=max_kc).rev()` to `min_kc..=max_kc` (ascending). Now `free_keycodes` is `[min_free, ..., max_free]` and `last()` yields the highest free keycode (e.g., 255). High keycodes are reliably unused by hardware and processed correctly by XTest.
+
+**Lesson**: When allocating scratch X11 keycodes for `XChangeKeyboardMapping` + `XTestFakeKeyEvent`, always prefer high keycodes (near `max_kc`). Low keycodes near `min_kc` (8 on Linux) have special status and may be silently discarded by the X server when used with XTest.
+
+## 14. Multimedia keysyms falsely reclaimed as rologlyphex emoji mappings
+
+**Symptom**: After the fix for anti-pattern #13, some keycodes occupied by multimedia keys were reclaimed as "our" emoji mappings. The condition `first_sym >= 0x01000000` matched multimedia keysyms (e.g., `0x1008FF..` XF86 keysyms) which are in that range, causing those keycodes to be added to the cache with wrong keysym→keycode associations.
+
+**Root cause**: The Unicode keysym range `0x01000000 + codepoint` for codepoints 0–10FFFF spans `0x01000000`–`0x0110FFFF`. XF86 multimedia keysyms use values like `0x1008FF02` (XF86Brightness) which fall above `0x0110FFFF` and are NOT Unicode keysyms — they are vendor-specific. The original check `first_sym >= 0x01000000` matched both.
+
+**Resolution**: Tightened the reclaim condition to `first_sym >= 0x01000000 && first_sym <= 0x0110FFFF`, matching only valid Unicode keysyms.
+
+**Lesson**: The `0x01000000 + codepoint` keysym encoding covers exactly `0x01000000`–`0x0110FFFF` (Unicode codepoints 0–10FFFF). Always use both bounds when checking for Unicode keysyms. Keysyms above `0x0110FFFF` are vendor-specific (XF86, multimedia, etc.) and must not be treated as Unicode.
