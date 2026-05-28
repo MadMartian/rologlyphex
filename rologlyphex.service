@@ -6,7 +6,6 @@ Wants=keyd.service
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/rologlyphex --config /etc/keyd/macropad.conf
-SupplementaryGroups=keyd
 Restart=always
 RestartSec=5
 StandardOutput=journal

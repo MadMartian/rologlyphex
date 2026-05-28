@@ -15,6 +15,7 @@ Coding, functional, and behavioural anti-patterns encountered during development
 | 9 | `XSync` is not sufficient before `XTestFakeKeyEvent` after `XChangeKeyboardMapping` |
 | 10 | idle_add_local_once race on first window map causes focus steal |
 | 11 | Pre-filtering CLI arguments |
+| 12 | `SupplementaryGroups` in a systemd user service fails with "Operation not permitted" |
 
 ## 1. GTK4 layout timing: measuring before layout
 
@@ -167,3 +168,16 @@ Coding, functional, and behavioural anti-patterns encountered during development
 **Resolution**: Single-pass parsing — `--verbose`/`-v` is handled as a case in the main `match` alongside other flags, consuming no additional arguments.
 
 **Lesson**: Never pre-filter arguments from a list before positional parsing. Parse in a single pass where each flag consumes its own arguments from the iterator. This is why argument parsing libraries exist, but even hand-rolled parsers should follow this pattern.
+
+## 12. `SupplementaryGroups` in a systemd user service fails with "Operation not permitted"
+
+**Symptom**: The service failed to start with `Failed at step GROUP spawning /usr/local/bin/rologlyphex: Operation not permitted`.
+
+**What was tried**:
+- `SupplementaryGroups=keyd` in the `[Service]` section of a systemd **user** service
+
+**Root cause**: User services run without `CAP_SETGID`. The `SupplementaryGroups` directive requires that capability to call `setgroups()`. System services (run by PID 1 as root) have it; user services don't. This is a fundamental systemd constraint, not a configuration error.
+
+**Resolution**: Removed `SupplementaryGroups=keyd` from the service file. The user service inherits whatever groups the user has at login. The user must be in the `keyd` group at the OS level (`sudo usermod -aG keyd $USER`, then log out and back in). After that, the service inherits the group without any special directive.
+
+**Lesson**: Never use `SupplementaryGroups` in a systemd user service — it will always fail. Group membership for user services must come from the user's login session. For keyd group access, `usermod -aG keyd $USER` + re-login is the only correct path.
