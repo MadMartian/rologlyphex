@@ -1,14 +1,16 @@
 # Test-Driven Development Rubrics
 
-| # | Functional area | Rubrics |
-|---|----------------|---------|
+| # | Functional area | Rubrics    |
+|---|----------------|------------|
 | 1 | CLI dispatch | 1.1 – 1.11 |
 | 2 | Config parsing | 2.1 – 2.15 |
-| 3 | keyd IPC | 3.1 – 3.5 |
+| 3 | keyd IPC | 3.1 – 3.5  |
 | 4 | Overlay window | 4.1 – 4.10 |
-| 5 | Unicode input synthesis | 5.1 – 5.7 |
-| 6 | Socket IPC | 6.1 – 6.7 |
-| 7 | Config hot reload | 7.1 – 7.3 |
+| 5 | Unicode input synthesis | 5.1 – 5.7  |
+| 6 | Socket IPC | 6.1 – 6.7  |
+| 7 | Config hot reload | 7.1 – 7.3  |
+| 8 | App configuration | 8.1 – 8.4  |
+| 9 | Miscellaneous | 9.1        |
 
 ## 1. CLI dispatch
 
@@ -189,10 +191,9 @@
 - **Then** the overlay hides
 
 ### 4.4 Overlay does not steal focus
-- **Given** a text editor has focus
+- **Given** a text editor has focus (including on the very first overlay appearance after daemon start)
 - **When** the overlay appears
 - **Then** the text editor retains focus and remains typeable
-- This applies from the very first appearance after daemon start, not just subsequent shows
 
 ### 4.5 Overlay is click-through
 - **Given** the overlay is visible over a portion of another window
@@ -256,15 +257,15 @@
 - **When** `rologlyphex type →` is invoked
 - **Then** "→" appears at the cursor position in the text editor
 
-### 5.6 High keycodes preferred for remapping
-- **Given** the daemon starts with a pool of free keycodes
-- **When** a character requires remapping via `XChangeKeyboardMapping`
-- **Then** a keycode near `max_kc` (e.g., 255) is used, not one near `min_kc` (e.g., 8)
+### 5.6 Characters type correctly when remapping is needed
+- **Given** no prior character-to-keycode mappings exist from the daemon (e.g., first run or after an X server restart)
+- **When** a character is typed that requires a new keycode assignment
+- **Then** the character appears correctly in the focused window
 
-### 5.7 Only valid Unicode keysyms are reclaimed at startup
-- **Given** the X server has keycodes mapped to both Unicode keysyms (0x01000000–0x0110FFFF) and vendor keysyms (e.g., XF86 multimedia keys above 0x0110FFFF)
-- **When** the daemon starts and scans existing mappings
-- **Then** only Unicode keysyms are reclaimed into the cache; vendor/multimedia keysyms are not reclaimed
+### 5.7 Startup does not interfere with existing keyboard shortcuts
+- **Given** the keyboard has multimedia or other special keys bound before the daemon starts
+- **When** the daemon starts
+- **Then** those keys continue to function normally
 
 ## 6. Socket IPC
 
@@ -313,7 +314,7 @@
 ### 7.1 Config change updates overlay content
 - **Given** a layout's character binding is changed in the keyd config
 - **When** `keyd reload` is run
-- **Then** the overlay shows the updated character on the next layout switch, without restarting the daemon
+- **Then** the daemon reflects the updated configuration — new characters type correctly and the overlay shows updated content — without restarting
 
 ### 7.2 Config re-parse is debounced
 - **Given** the keyd config file is written multiple times within 200ms
@@ -346,3 +347,10 @@
 - **Given** a malformed `config.toml`
 - **When** the daemon starts with valid CLI args
 - **Then** it logs a warning, falls back to defaults for missing values, and starts successfully
+
+## 9. Miscellaneous
+
+### 9.1 Crash logging
+- **Given** the daemon is running
+- **When** it encounters an unrecoverable error
+- **Then** a message identifying the failure location and cause is written to the system log

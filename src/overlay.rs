@@ -332,6 +332,20 @@ impl OverlayWindow {
                     legend_widget.append(&lbl);
                 }
             }
+        } else {
+            debug_log!("[🐛DEBUG] Warning: Layout name '{}' not found in map, clearing overlay content", layout_name);
+            if let Some(title_label) = content_box.first_child().and_then(|w| w.downcast::<Label>().ok()) {
+                title_label.set_label("");
+            }
+            if let Some(legend_widget) = content_box
+                .first_child()
+                .and_then(|w| w.next_sibling())
+                .and_then(|w| w.downcast::<Box>().ok())
+            {
+                while let Some(child) = legend_widget.first_child() {
+                    legend_widget.remove(&child);
+                }
+            }
         }
     }
 

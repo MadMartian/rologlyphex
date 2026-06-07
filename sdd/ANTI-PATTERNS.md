@@ -18,6 +18,7 @@ Coding, functional, and behavioural anti-patterns encountered during development
 | 12 | `SupplementaryGroups` in a systemd user service fails with "Operation not permitted" |
 | 13 | Low X11 keycodes (near min_kc) silently swallow XTest key events |
 | 14 | Multimedia keysyms falsely reclaimed as rologlyphex emoji mappings |
+| 15 | GTK4 single-instance mechanism causes silent exit code 0 when another instance is running |
 
 ## 1. GTK4 layout timing: measuring before layout
 
@@ -208,3 +209,18 @@ Coding, functional, and behavioural anti-patterns encountered during development
 **Resolution**: Tightened the reclaim condition to `first_sym >= 0x01000000 && first_sym <= 0x0110FFFF`, matching only valid Unicode keysyms.
 
 **Lesson**: The `0x01000000 + codepoint` keysym encoding covers exactly `0x01000000`–`0x0110FFFF` (Unicode codepoints 0–10FFFF). Always use both bounds when checking for Unicode keysyms. Keysyms above `0x0110FFFF` are vendor-specific (XF86, multimedia, etc.) and must not be treated as Unicode.
+
+## 15. GTK4 single-instance mechanism causes silent exit code 0 when another instance is running
+
+**Symptom**: The systemd user service exits with `status=0/SUCCESS` after ~10ms, auto-restarts, and exits again in a tight loop. No error output appears in the journal. `systemctl status` shows clean exits with `code=exited, status=0/SUCCESS`.
+
+**What was tried**:
+- Checking service environment variables (`DISPLAY`, `DBUS_SESSION_BUS_ADDRESS`) — all correct
+- Checking binary timestamps — binary was current
+- Running the binary manually to capture stderr — the manual run also exited quickly with only the first few debug lines
+
+**Root cause**: GTK4's `Application` uses the `application_id` (`com.extollit.rologlyphex`) to register on the D-Bus session bus as a single-instance application. When a second instance starts with the same ID, GTK routes the `activate` signal to the already-running primary instance and the new instance exits immediately with code 0 — cleanly and silently. In this case, a manual debugging run (`rologlyphex --verbose &`) had been backgrounded and was still running, holding the D-Bus name. Every service restart attempt yielded to it.
+
+**Resolution**: `pgrep -a rologlyphex` revealed the stale background process. `busctl --user list | grep extollit` confirmed it held the D-Bus registration. Killing the stale process allowed the service to start normally.
+
+**Lesson**: When a GTK4 daemon exits with code 0 immediately after startup with no error output, the first thing to check is another instance holding the same `application_id`. Use `pgrep -a <name>` and `busctl --user list | grep <app-id>` to find it. Never leave manual debugging runs of a GTK4 daemon backgrounded while also trying to run the systemd service.

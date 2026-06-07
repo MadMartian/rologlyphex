@@ -7,13 +7,14 @@ use crate::xtype::XTyper;
 use crate::debug_log;
 
 use crate::settings::AppSettings;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// Maximum bytes to read from a client connection.
 /// A single UTF-8 character is at most 4 bytes; 16 bytes is generous.
 const MAX_MESSAGE_SIZE: usize = 16;
 
-pub fn run_server(_settings: Arc<AppSettings>) -> Result<(), String> {
+pub fn run_server(_settings: Arc<AppSettings>, reload_flag: Arc<AtomicBool>) -> Result<(), String> {
     let path = socket_path();
 
     if path.exists() {
@@ -60,6 +61,11 @@ pub fn run_server(_settings: Arc<AppSettings>) -> Result<(), String> {
                         if chars.next().is_some() {
                             eprintln!("Warning: received multiple characters '{}', typing only first '{}'", text, ch);
                         }
+
+                        if reload_flag.swap(false, Ordering::Relaxed) {
+                            typer.rescan();
+                        }
+
                         debug_log!("[🐛DEBUG] Typing: {:?}", ch);
                         typer.type_char(ch);
                     }

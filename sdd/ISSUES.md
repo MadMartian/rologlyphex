@@ -3,6 +3,7 @@
 | ID | Issue | Severity |
 |----|-------|----------|
 | A | Keycode pool depletion across restarts | Low |
+| E | Caps Lock active causes wrong character output (XKB/core mapping mismatch) | Medium |
 | B | 100ms polling latency | Low |
 | C | Double config re-parse on keyd reload | Low |
 | D | Non-BMP characters (emoji) produce wrong output in JetBrains IDEs | Medium |
@@ -56,3 +57,18 @@ The XTest/keysym approach encodes non-BMP characters (U+10000+) as keysyms `0x01
 - Use the IDE's built-in emoji picker (Edit → Emoji & Symbols or OS-level shortcut) for emoji in JetBrains IDEs
 - Assign only BMP characters to macropad layouts used while coding in JetBrains IDEs
 - Revisit if JetBrains fixes AWT keysym handling upstream
+
+## E. Caps Lock active causes wrong character output (XKB/core mapping mismatch)
+
+**Severity**: Medium (user-visible, reproducible with Caps Lock on)
+
+When Caps Lock is active, characters typed via rologlyphex produce wrong output. Example: '∅' appears as 'X'.
+
+**Root cause**: `XChangeKeyboardMapping` modifies the **core** Xlib keyboard mapping for a keycode. Modern X11 applications use **XKB** (X Keyboard Extension), which maintains its own independent keysym table. When Caps Lock is active, XKB applies its modifier rules using its own keysym table — and for the high keycodes rologlyphex uses (near `max_kc`, e.g., 255), XKB may have its own keysym at the Caps Lock modifier level (e.g., 'X'). The application receives XKB's translation rather than the core mapping set by rologlyphex.
+
+**Approaches not yet tried**:
+- Update the XKB mapping in addition to the core mapping (e.g., via `XkbChangeTypesOfKey` or by sending `XkbMapNotify`)
+- Send XTest events with explicit modifier state that suppresses Caps Lock (lock mask cleared in the event)
+- Use `XkbSetMap` to write the keysym into the XKB table alongside the core mapping
+
+**Mitigation**: Turn off Caps Lock before using macropad character layouts.

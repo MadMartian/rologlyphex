@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -28,9 +29,14 @@ const _: () = assert!(std::mem::size_of::<IpcMessage>() == 4112);
 /// IPC message type values from keyd's enum
 const IPC_LAYER_LISTEN: i32 = 6; // 0=SUCCESS,1=FAIL,2=BIND,3=INPUT,4=MACRO,5=RELOAD,6=LAYER_LISTEN
 
-pub fn listen_to_keyd(layout_map: Arc<RwLock<HashMap<String, LayoutInfo>>>, current_layout: Arc<Mutex<String>>, config_path: Arc<String>) -> Result<(), String> {
+pub fn listen_to_keyd(
+    layout_map: Arc<RwLock<HashMap<String, LayoutInfo>>>,
+    current_layout: Arc<Mutex<String>>,
+    config_path: Arc<String>,
+    reload_flag: Arc<AtomicBool>,
+) -> Result<(), String> {
     loop {
-        match connect_and_listen(&layout_map, &current_layout, &config_path) {
+        match connect_and_listen(&layout_map, &current_layout, &config_path, &reload_flag) {
             Ok(()) => {
                 thread::sleep(Duration::from_millis(500));
             }
@@ -42,7 +48,12 @@ pub fn listen_to_keyd(layout_map: Arc<RwLock<HashMap<String, LayoutInfo>>>, curr
     }
 }
 
-fn connect_and_listen(layout_map: &Arc<RwLock<HashMap<String, LayoutInfo>>>, current_layout: &Arc<Mutex<String>>, config_path: &str) -> Result<(), String> {
+fn connect_and_listen(
+    layout_map: &Arc<RwLock<HashMap<String, LayoutInfo>>>,
+    current_layout: &Arc<Mutex<String>>,
+    config_path: &str,
+    reload_flag: &Arc<AtomicBool>,
+) -> Result<(), String> {
     let mut stream = UnixStream::connect(KEYD_SOCKET_PATH)
         .map_err(|e| format!("Failed to connect to keyd socket: {}", e))?;
 
@@ -90,7 +101,7 @@ fn connect_and_listen(layout_map: &Arc<RwLock<HashMap<String, LayoutInfo>>>, cur
 
                     if !line.is_empty() {
                         debug_log!("[🐛DEBUG] IPC line: {:?}", line);
-                        handle_layout_event(&line, layout_map, current_layout, config_path);
+                        handle_layout_event(&line, layout_map, current_layout, config_path, reload_flag);
                     }
                 }
             }
@@ -101,7 +112,13 @@ fn connect_and_listen(layout_map: &Arc<RwLock<HashMap<String, LayoutInfo>>>, cur
     }
 }
 
-fn handle_layout_event(line: &str, layout_map: &Arc<RwLock<HashMap<String, LayoutInfo>>>, current_layout: &Arc<Mutex<String>>, config_path: &str) {
+fn handle_layout_event(
+    line: &str,
+    layout_map: &Arc<RwLock<HashMap<String, LayoutInfo>>>,
+    current_layout: &Arc<Mutex<String>>,
+    config_path: &str,
+    reload_flag: &Arc<AtomicBool>,
+) {
     if let Some(layout_name) = line.strip_prefix('/') {
         // Layout change event
         let layout_name = layout_name.trim();
@@ -111,10 +128,11 @@ fn handle_layout_event(line: &str, layout_map: &Arc<RwLock<HashMap<String, Layou
             *layout = layout_name.to_string();
         }
 
-        // If it's /main (after reload), schedule config re-parse
+        // If it's /main (after reload), schedule config re-parse and XTyper rescan
         if layout_name == "main" {
             debug_log!("[🐛DEBUG] Detected reload signal (/main event)");
             reparse_config(layout_map, config_path);
+            reload_flag.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }

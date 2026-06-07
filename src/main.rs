@@ -146,7 +146,25 @@ fn parse_args() -> Mode {
 const DEFAULT_WIDTH: i32 = 600;
 const DEFAULT_HEIGHT: i32 = 275;
 
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let location = info.location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown location>".to_string());
+        let message = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "<non-string panic payload>".to_string()
+        };
+        eprintln!("[CRASH] rologlyphex panicked at {}: {}", location, message);
+        eprintln!("[CRASH] Set RUST_BACKTRACE=1 for a backtrace.");
+    }));
+}
+
 fn main() {
+    install_panic_hook();
     match parse_args() {
         Mode::Type(character) => {
             client::send_type(&character);
@@ -196,6 +214,9 @@ fn run_daemon(settings: Arc<AppSettings>) {
 
     // Shared current layout name for IPC listener to update
     let current_layout = Arc::new(Mutex::new(String::from("main")));
+
+    // Flag to signal XTyper rescan after keyd reload
+    let reload_flag = Arc::new(AtomicBool::new(false));
 
     // GTK Application setup
     let app = Application::builder()
@@ -259,16 +280,18 @@ fn run_daemon(settings: Arc<AppSettings>) {
     let layout_map_ipc = layout_map.clone();
     let current_layout_ipc = current_layout.clone();
     let keyd_config_path_ipc = keyd_config_path.clone();
+    let reload_flag_ipc = reload_flag.clone();
     thread::spawn(move || {
-        if let Err(e) = ipc::listen_to_keyd(layout_map_ipc, current_layout_ipc, keyd_config_path_ipc) {
+        if let Err(e) = ipc::listen_to_keyd(layout_map_ipc, current_layout_ipc, keyd_config_path_ipc, reload_flag_ipc) {
             eprintln!("IPC listener error: {}", e);
         }
     });
 
     // Spawn type-command socket server thread
     let settings_server = settings.clone();
+    let reload_flag_server = reload_flag.clone();
     thread::spawn(move || {
-        if let Err(e) = server::run_server(settings_server) {
+        if let Err(e) = server::run_server(settings_server, reload_flag_server) {
             eprintln!("Socket server error: {}", e);
         }
     });

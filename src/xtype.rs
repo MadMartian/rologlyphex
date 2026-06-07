@@ -30,44 +30,56 @@ impl XTyper {
             return Err("Cannot open X11 display".to_string());
         }
 
-        // Collect unused keycodes
+        let mut typer = XTyper {
+            display,
+            cache: HashMap::new(),
+            free_keycodes: Vec::new(),
+        };
+
+        typer.scan_keycodes();
+        Ok(typer)
+    }
+
+    pub fn rescan(&mut self) {
+        self.cache.clear();
+        self.free_keycodes.clear();
+        self.scan_keycodes();
+        debug_log!(
+            "[🐛DEBUG] XTyper rescan: {} free keycodes, {} reclaimed",
+            self.free_keycodes.len(),
+            self.cache.len()
+        );
+    }
+
+    fn scan_keycodes(&mut self) {
         let mut min_kc: i32 = 0;
         let mut max_kc: i32 = 0;
-        unsafe { xlib::XDisplayKeycodes(display, &mut min_kc, &mut max_kc); }
-
-        let mut free_keycodes = Vec::new();
-        let mut cache = HashMap::new();
+        unsafe {
+            xlib::XDisplayKeycodes(self.display, &mut min_kc, &mut max_kc);
+        }
 
         for kc in min_kc..=max_kc {
             let mut keysyms_per_kc: i32 = 0;
-            let mapping = unsafe {
-                xlib::XGetKeyboardMapping(display, kc as u8, 1, &mut keysyms_per_kc)
-            };
-            if mapping.is_null() { continue; }
+            let mapping = unsafe { xlib::XGetKeyboardMapping(self.display, kc as u8, 1, &mut keysyms_per_kc) };
+            if mapping.is_null() {
+                continue;
+            }
 
             let first_sym = unsafe { *mapping };
-            let all_empty = (0..keysyms_per_kc as usize).all(|i| unsafe {
-                *mapping.add(i) == xlib::NoSymbol as xlib::KeySym
-            });
-            unsafe { xlib::XFree(mapping as *mut _); }
+            let all_empty = (0..keysyms_per_kc as usize)
+                .all(|i| unsafe { *mapping.add(i) == xlib::NoSymbol as xlib::KeySym });
+            unsafe {
+                xlib::XFree(mapping as *mut _);
+            }
 
             if all_empty {
-                free_keycodes.push(kc as u8);
+                self.free_keycodes.push(kc as u8);
             } else if first_sym >= 0x01000000 && first_sym <= 0x0110FFFF {
                 // Reclaim keycode previously mapped by rologlyphex — pre-populate
                 // cache so this keysym is found instantly without a new mapping slot.
-                cache.insert(first_sym, kc as u8);
+                self.cache.insert(first_sym, kc as u8);
             }
         }
-
-        debug_log!("[🐛DEBUG] XTyper: {} free keycodes, {} reclaimed from previous session",
-            free_keycodes.len(), cache.len());
-
-        Ok(XTyper {
-            display,
-            cache,
-            free_keycodes,
-        })
     }
 
     pub fn type_char(&mut self, ch: char) {
