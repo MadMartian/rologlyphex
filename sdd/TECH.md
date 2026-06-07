@@ -4,9 +4,9 @@
 
 ```
 ┌─────────────────┐     USB HID      ┌──────────┐    evdev     ┌──────────┐
-│  SinLoon 3-key  │ ───────────────> │  Linux   │ ──────────> │   keyd   │
-│  + knob macropad│   Ctrl+Alt+      │  kernel  │  f13-f18    │  daemon  │
-└─────────────────┘   Shift+F13-F18  └──────────┘             └────┬─────┘
+│    Macropad     │ ───────────────> │  Linux   │ ──────────> │   keyd   │
+│  (keys + knob)  │    F13-F18       │  kernel  │  f13-f18    │  daemon  │
+└─────────────────┘                  └──────────┘             └────┬─────┘
                                                                    │
                                             ┌──────────────────────┼────────────────┐
                                             │                      │                │
@@ -77,7 +77,7 @@ The application crosses two FFI boundaries not covered by crate bindings:
 |--------|--------|----------------|
 | `main.rs` | main | CLI parsing, GTK `Application` setup, thread spawning, 100ms layout-change polling, panic hook for crash logging |
 | `settings.rs` | main | App config file loading, CLI merge, settings resolution |
-| `overlay.rs` | main | GTK4 window lifecycle, Xlib FFI for WM properties, CSS styling, font-size fallback, dismiss timer |
+| `overlay.rs` | main | GTK4 window lifecycle, Xlib FFI for WM properties, CSS styling, font-size fallback, FlowBox legend wrapping, content-driven window height, dismiss timer |
 | `xtype.rs` | socket server | XTest key synthesis, `XChangeKeyboardMapping` for unmapped keysyms, keysym cache |
 | `server.rs` | socket server | Unix socket listener, reads character from client, delegates to `XTyper` |
 | `client.rs` | (separate process) | Connects to daemon socket, sends character, exits |

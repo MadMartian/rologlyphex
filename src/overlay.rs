@@ -2,7 +2,7 @@ use crate::config::LayoutInfo;
 use crate::debug_log;
 use glib::timeout_add_local_once;
 use gtk4::prelude::*;
-use gtk4::{Align, Application, ApplicationWindow, Box, CssProvider, Label, Orientation};
+use gtk4::{Align, Application, ApplicationWindow, Box, CssProvider, FlowBox, Label, Orientation};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::ffi::c_ulong;
@@ -25,7 +25,7 @@ pub struct OverlayWindow {
 }
 
 impl OverlayWindow {
-    pub fn new(app: &Application, layout_map: Arc<RwLock<HashMap<String, LayoutInfo>>>, dismiss_timeout_ms: u64, window_width: i32, window_height: i32) -> Self {
+    pub fn new(app: &Application, layout_map: Arc<RwLock<HashMap<String, LayoutInfo>>>, dismiss_timeout_ms: u64, window_width: i32, _window_height: i32) -> Self {
         // Verify display is available and running on X11 backend
         let display = gdk4::Display::default().unwrap_or_else(|| {
             eprintln!("Error: no display available. Ensure a graphical session is running.");
@@ -42,7 +42,7 @@ impl OverlayWindow {
 
         window.set_decorated(false);
         window.set_resizable(false);
-        window.set_default_size(window_width, window_height);
+        window.set_default_size(window_width, -1);
         window.set_title(Some("rologlyphex"));
         window.set_focusable(false);
         window.set_focus_on_click(false);
@@ -59,8 +59,8 @@ impl OverlayWindow {
         content_box.set_margin_bottom(16);
         content_box.set_margin_start(16);
         content_box.set_margin_end(16);
-        content_box.set_halign(Align::Center);
-        content_box.set_valign(Align::Center);
+        content_box.set_halign(Align::Fill);
+        content_box.set_valign(Align::Start);
 
         let title_label = Label::new(None);
         title_label.add_css_class("overlay-title");
@@ -68,8 +68,15 @@ impl OverlayWindow {
         title_label.set_hexpand(true);
         content_box.append(&title_label);
 
-        let legend_box = Box::new(Orientation::Horizontal, 8);
-        legend_box.set_halign(Align::Center);
+        let legend_box = FlowBox::new();
+        legend_box.set_selection_mode(gtk4::SelectionMode::None);
+        legend_box.set_homogeneous(true);
+        legend_box.set_column_spacing(8);
+        legend_box.set_row_spacing(8);
+        legend_box.set_min_children_per_line(1);
+        legend_box.set_max_children_per_line(100);
+        legend_box.set_halign(Align::Fill);
+        legend_box.set_valign(Align::Start);
         content_box.append(&legend_box);
 
         window.set_child(Some(&content_box));
@@ -118,6 +125,10 @@ impl OverlayWindow {
         if let Some(child) = self.window.child() {
             if let Ok(content_box) = child.downcast::<Box>() {
                 self.update_layout_content(&content_box, layout_name);
+                let (_, natural_h, _, _) = content_box.measure(Orientation::Vertical, self.window_width);
+                if natural_h > 0 {
+                    self.window.set_size_request(self.window_width, natural_h);
+                }
             }
         }
 
@@ -227,7 +238,7 @@ impl OverlayWindow {
                 1,
             );
 
-            // Set _KDE_NET_WM_ACTIVITIES to empty string = show on all KDE activities
+            // Set _KDE_NET_WM_ACTIVITIES to empty string = show on all virtual activities
             let kde_activities = x11::xlib::XInternAtom(xdisplay, b"_KDE_NET_WM_ACTIVITIES\0".as_ptr() as *const _, 0);
             let xa_string = x11::xlib::XInternAtom(xdisplay, b"STRING\0".as_ptr() as *const _, 0);
             x11::xlib::XChangeProperty(
@@ -320,7 +331,7 @@ impl OverlayWindow {
             if let Some(legend_widget) = content_box
                 .first_child()
                 .and_then(|w| w.next_sibling())
-                .and_then(|w| w.downcast::<Box>().ok())
+                .and_then(|w| w.downcast::<FlowBox>().ok())
             {
                 while let Some(child) = legend_widget.first_child() {
                     legend_widget.remove(&child);
@@ -340,7 +351,7 @@ impl OverlayWindow {
             if let Some(legend_widget) = content_box
                 .first_child()
                 .and_then(|w| w.next_sibling())
-                .and_then(|w| w.downcast::<Box>().ok())
+                .and_then(|w| w.downcast::<FlowBox>().ok())
             {
                 while let Some(child) = legend_widget.first_child() {
                     legend_widget.remove(&child);
@@ -415,6 +426,10 @@ impl OverlayWindow {
                 border-radius: 4px;
                 padding: 8px 12px;
                 font-size: 84px;
+            }
+            flowboxchild {
+                padding: 0;
+                margin: 0;
             }
         ";
 

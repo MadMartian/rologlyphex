@@ -5,7 +5,7 @@
 | 1 | CLI dispatch | 1.1 – 1.11 |
 | 2 | Config parsing | 2.1 – 2.15 |
 | 3 | keyd IPC | 3.1 – 3.5  |
-| 4 | Overlay window | 4.1 – 4.10 |
+| 4 | Overlay window | 4.1 – 4.11 |
 | 5 | Unicode input synthesis | 5.1 – 5.7  |
 | 6 | Socket IPC | 6.1 – 6.7  |
 | 7 | Config hot reload | 7.1 – 7.3  |
@@ -34,10 +34,10 @@
 - **When** it starts
 - **Then** it prints a usage message and exits with non-zero status
 
-### 1.5 Size flag is parsed
+### 1.5 Size flag sets overlay width
 - **Given** the binary is invoked with `--size 800x300`
 - **When** the daemon starts
-- **Then** the overlay window is created with dimensions 800x300
+- **Then** the overlay window is created with width 800; height is content-driven and the `300` component is ignored
 
 ### 1.6 Size flag rejects non-positive dimensions
 - **Given** the binary is invoked with `--size -1x0`
@@ -215,8 +215,8 @@
 - **When** the overlay displays that layout
 - **Then** the title is truncated with a trailing ellipsis
 
-### 4.9 Overlay visible on all KDE activities
-- **Given** the daemon is running on KDE Plasma with multiple activities
+### 4.9 Overlay visible on all virtual activities
+- **Given** the daemon is running on a desktop environment with multiple virtual activities
 - **When** the user switches to a different activity and triggers a layout change
 - **Then** the overlay appears on that activity (not confined to the launch activity)
 
@@ -224,6 +224,11 @@
 - **Given** the daemon is running with multiple virtual desktops configured
 - **When** the user switches to a different virtual desktop and triggers a layout change
 - **Then** the overlay appears on that desktop (not confined to the launch desktop)
+
+### 4.11 Button legends wrap when they overflow a single row
+- **Given** a layout has more button legends than fit in a single row at the configured window width
+- **When** the overlay appears
+- **Then** all button legends are visible, arranged across multiple rows
 
 ## 5. Unicode input synthesis
 

@@ -2,11 +2,11 @@
 
 | ID | Issue | Severity |
 |----|-------|----------|
-| A | Keycode pool depletion across restarts | Low |
+| A | Keycode pool depletion across restarts | Low (fixed with LRU eviction) |
 | E | Caps Lock active causes wrong character output (XKB/core mapping mismatch) | Medium |
 | B | 100ms polling latency | Low |
 | C | Double config re-parse on keyd reload | Low |
-| D | Non-BMP characters (emoji) produce wrong output in JetBrains IDEs | Medium |
+| D | Non-BMP characters (emoji) produce wrong output in Java/AWT-based applications | Medium |
 
 ## A. Keycode pool depletion across restarts
 
@@ -41,22 +41,22 @@ The inotify watcher has a 200ms debounce, but the IPC `/main` handler has none a
 
 **Mitigation**: Add a shared debounce mechanism (e.g., a timestamp of last reparse) checked by both the inotify and IPC paths.
 
-## D. Non-BMP characters (emoji) produce wrong output in JetBrains IDEs
+## D. Non-BMP characters (emoji) produce wrong output in Java/AWT-based applications
 
-**Severity**: Medium (user-visible, affects emoji layouts in JetBrains IDEs)
+**Severity**: Medium (user-visible, affects emoji layouts in Java/AWT-based IDEs and apps)
 
-The XTest/keysym approach encodes non-BMP characters (U+10000+) as keysyms `0x01000000 + codepoint`. Java's AWT/Swing in JetBrains IDEs truncates these via `(int)(keysym & 0xFFFF)`, producing wrong CJK glyphs instead of the intended emoji. BMP characters and all other tested applications (Konsole, Firefox, GTK apps) are unaffected.
+The XTest/keysym approach encodes non-BMP characters (U+10000+) as keysyms `0x01000000 + codepoint`. Java's AWT/Swing truncates these via `(int)(keysym & 0xFFFF)`, producing wrong CJK glyphs instead of the intended emoji. BMP characters and all other tested applications (terminal emulators, browsers, GTK apps) are unaffected.
 
 **Approaches investigated and rejected**:
 - **Clipboard paste + Ctrl+V** (implemented twice, reverted twice): Race conditions between clipboard ownership release and application data request made it unreliable in practice. Also destroys the user's clipboard, and Ctrl+V is intercepted by terminal emulators as a literal control character.
-- **IBus CommitText via D-Bus**: IBus contexts require `FocusIn` from the application side — external push-based injection hangs indefinitely or is rejected. IBus is pull-based by design.
+- **Input method CommitText via D-Bus**: Input method contexts require `FocusIn` from the application side — external push-based injection hangs indefinitely or is rejected. Input methods are pull-based by design.
 - **XSendEvent ClientMessage**: Most applications ignore synthetic XSendEvent for security reasons.
-- **XDG portal clipboard**: Portal support unverified for JetBrains IDEs; likely not available.
+- **XDG portal clipboard**: Portal support for Java/AWT applications is unverified; likely not available.
 
 **Mitigation options**:
-- Use the IDE's built-in emoji picker (Edit → Emoji & Symbols or OS-level shortcut) for emoji in JetBrains IDEs
-- Assign only BMP characters to macropad layouts used while coding in JetBrains IDEs
-- Revisit if JetBrains fixes AWT keysym handling upstream
+- Use the application's built-in emoji picker (Edit → Emoji & Symbols or OS-level shortcut) for emoji in Java/AWT applications
+- Assign only BMP characters to macropad layouts used while running Java/AWT applications
+- Revisit if the Java/AWT keysym handling is fixed upstream
 
 ## E. Caps Lock active causes wrong character output (XKB/core mapping mismatch)
 
@@ -72,3 +72,4 @@ When Caps Lock is active, characters typed via rologlyphex produce wrong output.
 - Use `XkbSetMap` to write the keysym into the XKB table alongside the core mapping
 
 **Mitigation**: Turn off Caps Lock before using macropad character layouts.
+

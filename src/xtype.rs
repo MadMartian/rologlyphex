@@ -1,6 +1,6 @@
 use x11::xlib;
 use x11::xtest;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ptr;
 use crate::debug_log;
 
@@ -11,6 +11,9 @@ pub struct XTyper {
     display: *mut xlib::Display,
     cache: HashMap<xlib::KeySym, u8>,
     free_keycodes: Vec<u8>,
+    /// LRU order for cache eviction when free_keycodes is exhausted.
+    /// Front = least recently used (evict first). Back = most recently used.
+    lru_order: VecDeque<xlib::KeySym>,
 }
 
 // SAFETY: XTyper owns a dedicated Xlib Display connection opened in XTyper::open().
@@ -34,6 +37,7 @@ impl XTyper {
             display,
             cache: HashMap::new(),
             free_keycodes: Vec::new(),
+            lru_order: VecDeque::new(),
         };
 
         typer.scan_keycodes();
@@ -43,6 +47,7 @@ impl XTyper {
     pub fn rescan(&mut self) {
         self.cache.clear();
         self.free_keycodes.clear();
+        self.lru_order.clear();
         self.scan_keycodes();
         debug_log!(
             "[🐛DEBUG] XTyper rescan: {} free keycodes, {} reclaimed",
@@ -78,6 +83,7 @@ impl XTyper {
                 // Reclaim keycode previously mapped by rologlyphex — pre-populate
                 // cache so this keysym is found instantly without a new mapping slot.
                 self.cache.insert(first_sym, kc as u8);
+                self.lru_order.push_back(first_sym);
             }
         }
     }
@@ -86,6 +92,11 @@ impl XTyper {
         let keysym = unicode_to_keysym(ch);
 
         if let Some(&keycode) = self.cache.get(&keysym) {
+            // Move to back of LRU (most recently used) so it's last to be evicted.
+            if let Some(pos) = self.lru_order.iter().position(|&s| s == keysym) {
+                self.lru_order.remove(pos);
+                self.lru_order.push_back(keysym);
+            }
             self.send_key(keycode as u32);
             return;
         }
@@ -110,12 +121,27 @@ impl XTyper {
     fn remap_and_type(&mut self, keysym: xlib::KeySym) {
         let t0 = std::time::Instant::now();
 
-        let free_kc = match self.free_keycodes.last() {
-            Some(&kc) => kc,
-            None => {
-                eprintln!("Error: no free keycodes for keysym 0x{:x}", keysym);
-                return;
-            }
+        // Prefer a free keycode; if the pool is exhausted, evict the LRU cached entry.
+        let (free_kc, consumed_free_slot) = if let Some(&kc) = self.free_keycodes.last() {
+            (kc, true)
+        } else {
+            let evicted_sym = match self.lru_order.pop_front() {
+                Some(s) => s,
+                None => {
+                    eprintln!("Error: no keycodes available for keysym 0x{:x}", keysym);
+                    return;
+                }
+            };
+            let kc = match self.cache.remove(&evicted_sym) {
+                Some(k) => k,
+                None => {
+                    eprintln!("Error: LRU eviction cache miss for 0x{:x}", evicted_sym);
+                    return;
+                }
+            };
+            debug_log!("[🐛DEBUG] Evicting LRU keysym 0x{:x} from keycode {} for 0x{:x}",
+                evicted_sym, kc, keysym);
+            (kc, false)
         };
 
         unsafe {
@@ -150,10 +176,13 @@ impl XTyper {
         self.send_key(free_kc as u32);
 
         self.cache.insert(keysym, free_kc);
-        self.free_keycodes.pop();
+        self.lru_order.push_back(keysym);
+        if consumed_free_slot {
+            self.free_keycodes.pop();
+        }
 
-        debug_log!("[🐛DEBUG] Remapped keysym 0x{:x} -> keycode {} ({:?}), {} free remaining",
-            keysym, free_kc, t0.elapsed(), self.free_keycodes.len());
+        debug_log!("[🐛DEBUG] Remapped keysym 0x{:x} -> keycode {} ({:?}), {} free + {} cached",
+            keysym, free_kc, t0.elapsed(), self.free_keycodes.len(), self.cache.len());
     }
 }
 

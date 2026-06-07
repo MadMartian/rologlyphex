@@ -78,7 +78,7 @@ f13 = command(rologlyphex type →)
 f14 = command(rologlyphex type 🔥)
 ```
 
-> **Note**: emoji and other non-BMP characters (U+10000+) produce wrong output in JetBrains IDEs (RustRover, IntelliJ, etc.) due to Java/AWT keysym truncation. They work correctly in terminals, browsers, and GTK/Qt apps.
+> **Note**: emoji and other non-BMP characters (U+10000+) produce wrong output in Java/AWT-based applications due to keysym truncation. They work correctly in terminals, browsers, and GTK/Qt apps.
 
 ## How it works
 

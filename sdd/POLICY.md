@@ -71,6 +71,13 @@ All data crossing system boundaries must be validated:
 - The Makefile `install` target is the canonical install method
 - The user must be in the `keyd` group for IPC access; this is a documented prerequisite, not something the application should attempt to fix at runtime
 
+## Privacy and attribution
+
+- Do not write specific hardware brand names, product model numbers, or trademarks in any file in this repository
+- Do not include machine-specific details (hardware identifiers, vendor IDs, product IDs, device-specific configurations) in any file in this repository
+- Describe hardware generically (e.g., "macropad", "secondary keyboard", "full-keyboard device") rather than by brand or model
+- When documenting bugs or anti-patterns, describe the class of software or hardware involved, not the specific product that exhibited the behavior
+
 ## Debug output
 
 - All debug logging uses the `debug_log!` macro, which is gated behind `--verbose` / `-v`

@@ -19,6 +19,35 @@ Coding, functional, and behavioural anti-patterns encountered during development
 | 13 | Low X11 keycodes (near min_kc) silently swallow XTest key events |
 | 14 | Multimedia keysyms falsely reclaimed as rologlyphex emoji mappings |
 | 15 | GTK4 single-instance mechanism causes silent exit code 0 when another instance is running |
+| 16 | GTK4 FlowBox with `halign=Center` ignores allocated width; `set_default_size` ignored on realized windows |
+| 17 | keyd hard-limits `command()` calls to 64 per config file — excess bindings silently dropped |
+| 18 | Full-keyboard virtual device consumes nearly all X11 keycodes, leaving only ~10 free for XTest remapping |
+| 19 | EEPROM chord modifiers (Ctrl+Alt+Shift) bleed through keyd virtual keyboard, corrupting XCompose sequences |
+
+## 16. GTK4 FlowBox with `halign=Center` ignores allocated width; `set_default_size` ignored on realized windows
+
+**Symptom**: Switching from a fixed horizontal `Box` to a `FlowBox` for the button legend caused two separate failures, each masking the other:
+
+1. Emoji layouts (wider cells) overflowed the right edge of the overlay window despite the window having a fixed width.
+2. After fixing overflow by adjusting `min_children_per_line`, the window gained large amounts of empty vertical space below the content, extending off the bottom of the screen.
+
+**What was tried**:
+- `set_min_children_per_line(5)` — stopped overflow for math symbol layouts (5 × ~68px = 340px < 600px) but not emoji layouts (5 × ~100px = 500px, still fits), yet then set to a value where emoji DID overflow
+- `set_homogeneous(false)` — caused each row to contain exactly 1 item because FlowBox measures natural width as 1 cell
+- Calling `set_default_size(window_width, natural_h)` in `show_layout()` to dynamically resize the window height — had no effect at all
+
+**Root cause**: Two independent GTK4 behaviors combined:
+
+1. **`FlowBox` with `halign=Center` ignores allocated width.** A `FlowBox` with `halign=Center` calculates row breaks using its *natural* width, not the width allocated to it by its parent. Natural width = `min_children_per_line × max_cell_width`. Emoji cells are wider than math cells, so with `halign=Center` the FlowBox could overflow the container even though the container was correctly constrained to 600px.
+
+2. **`set_default_size` is ignored on already-realized windows.** `WidgetExt::realize()` is called explicitly in `Overlay::new()` (necessary for setting X11 properties before first map). After `realize()`, the window is already realized and `set_default_size()` calls from `show_layout()` are silently ignored — they only take effect before realize.
+
+**Resolution**:
+- Set `set_halign(Align::Fill)` on both the `content_box` and the `legend_box` (FlowBox). `Align::Fill` forces the widget to use its *allocated* width for layout decisions, so FlowBox wraps at the actual container boundary regardless of cell size.
+- Replace `set_default_size(w, natural_h)` with `set_size_request(w, natural_h)` in `show_layout()`. `set_size_request` works on already-realized windows; `set_default_size` does not.
+- Compute `natural_h` via `content_box.measure(Orientation::Vertical, window_width)` — this performs correct height-for-width computation at the constrained width, returning the actual height needed for the wrapped content.
+
+**Lesson**: `FlowBox` with `halign=Center` uses natural width for wrapping — this is almost never what you want for a width-constrained container. Use `halign=Fill` so wrapping is driven by allocated width. For dynamic window height on an already-realized GTK4 window, use `set_size_request()`, not `set_default_size()`. Measure content height with `widget.measure(Vertical, constrained_width)` after setting content, before calling `set_size_request`.
 
 ## 1. GTK4 layout timing: measuring before layout
 
@@ -66,7 +95,7 @@ Coding, functional, and behavioural anti-patterns encountered during development
 
 ## 4. Clipboard paste Ctrl+V in terminals
 
-**Symptom**: Emoji characters typed via clipboard paste appeared as `^V^V^V...` in Konsole.
+**Symptom**: Emoji characters typed via clipboard paste appeared as `^V^V^V...` in terminal emulators.
 
 **What was tried**:
 - Implementing full X11 clipboard ownership (claim CLIPBOARD, send Ctrl+V via XTest, serve SelectionRequest events)
@@ -224,3 +253,46 @@ Coding, functional, and behavioural anti-patterns encountered during development
 **Resolution**: `pgrep -a rologlyphex` revealed the stale background process. `busctl --user list | grep extollit` confirmed it held the D-Bus registration. Killing the stale process allowed the service to start normally.
 
 **Lesson**: When a GTK4 daemon exits with code 0 immediately after startup with no error output, the first thing to check is another instance holding the same `application_id`. Use `pgrep -a <name>` and `busctl --user list | grep <app-id>` to find it. Never leave manual debugging runs of a GTK4 daemon backgrounded while also trying to run the systemd service.
+
+## 17. keyd hard-limits `command()` calls to 64 per config file — excess bindings silently dropped
+
+**Symptom**: Some emoji buttons stopped typing characters. Entire layouts appeared non-functional. keyd logs showed `WARNING: /etc/keyd/macropad.conf:N: max commands (64), exceeded` for affected lines but continued starting normally.
+
+**Root cause**: keyd enforces a compile-time limit of 64 `command()` invocations per config file. With 8 emoji layouts × 10 `command(rologlyphex type …)` bindings = 80 total, the last 16 entries were silently dropped. Affected keys either did nothing or fell through to an unrelated base-layer binding. The warning is easy to miss because keyd still starts and most functionality works.
+
+**Resolution**: Reduced emoji layout count from 8 to 6 (60 command() calls, within the limit). The specific limit depends on the keyd version; `MAX_COMMANDS` may differ between releases. Check `journalctl -u keyd` after every config change that adds `command()` bindings.
+
+**Lesson**: keyd silently truncates `command()` bindings beyond 64 — it does not error, crash, or warn prominently. After any keyd config edit that adds `command()` entries, grep the journal for "max commands" before assuming the config is correct. If the limit must be raised, patch keyd's source (`MAX_COMMANDS` constant). Alternatively, restructure the config to use the `[main]` base layer for shared bindings so emoji layouts don't each need their own `command()` entries (requires a `rologlyphex type-nth N` client command — see PLAN.k100-integration.md).
+
+## 18. A full-keyboard virtual device consumes nearly all X11 keycodes, leaving only ~10 free for XTest remapping
+
+**Symptom**: After adding a full-keyboard virtual device (e.g., one created by a keyboard management daemon for a secondary keyboard) to the keyd config, `rologlyphex type` started failing with `Error: no free keycodes for keysym 0x101XXXX` after only 10 unique emoji. Previously dozens of emoji worked without error. `python3 -c "import subprocess; ..."` (xmodmap analysis) confirmed only 10 all-NoSymbol keycodes remained out of 248 total.
+
+**Root cause**: A full-keyboard virtual device registers an enormous keymap covering nearly all 248 X11 keycodes (8–255). Of these, ~238 are occupied by the device's keys and multimedia functions. This leaves only ~10 truly free (all-NoSymbol) keycodes for XTyper's remapping pool. Previously (with only the macropad and a standard keyboard), ~100 free keycodes were available.
+
+**Resolution**: Replaced the unbounded free-keycode pool with an LRU eviction cache in `XTyper`. When `free_keycodes` is exhausted, the least-recently-used emoji's keycode is evicted and reused for the new emoji. The evicted emoji incurs the ~30ms remap penalty again on next use; the current active emoji are always fast. Pool size is determined at startup by `scan_keycodes()` — with 10 free keycodes, 10 emoji can be "warm" simultaneously.
+
+**Lesson**: Adding a high-keycode-density device (such as a full-keyboard virtual device from a keyboard management daemon) can reduce the X11 free keycode pool to near-zero. `XTyper::open()`'s free keycode scan gives the true pool size; check it with `python3` + `xmodmap -pk` if emoji typing fails. The LRU fix makes the pool size irrelevant for correctness — any number of unique emoji work, just with amortized remap cost.
+
+## 19. EEPROM chord modifiers (Ctrl+Alt+Shift) bleed through keyd virtual keyboard, corrupting XCompose sequences
+
+**Symptom**: After adding a secondary full-keyboard device to the combined keyd config, all `macro()` bindings on the macropad (arrow/symbol layouts) produced garbled output. `xev` showed `Ctrl+Shift+Meta+Cancel+asciicircum+parenright+G` instead of the expected bare `Cancel+6+0+g`. Layouts using `command(rologlyphex type …)` were unaffected.
+
+**What was tried**:
+- Restarting the input method daemon without its X11 input method bridge — no change
+- Verifying `keyd.compose` entry — correct (`<Cancel> <6> <0> <g> : "≠"`)
+- Running `keyd monitor` — showed only `cancel 6 0 g` (no modifiers from keyd's virtual keyboard output)
+
+**Root cause**: The macropad EEPROM was originally flashed with `Ctrl+Alt+Shift+F13-F18` chord mappings. When a button is pressed, the device emits the modifier keys (Ctrl, Alt, Shift) as separate key events before the F-key. keyd intercepts the F-key and correctly emits the `macro()` compose sequence (`cancel 6 0 g`), but the modifier events pass through keyd's virtual keyboard to X11 unfiltered. Xlib's compose engine then sees the digit keysyms in their Shift variants (`asciicircum` instead of `6`, `parenright` instead of `0`, `G` instead of `g`), which don't match the compose entries in keyd.compose.
+
+Previously, `alt = noop` / `ctrl = noop` / `shift = noop` bindings in each keyd layout section absorbed the leaking modifiers. These noops were removed when a full-keyboard device was added to the combined config (they would have also suppressed normal keyboard modifier input, breaking typing). The `command(rologlyphex type …)` path was immune because XTest key synthesis doesn't go through XCompose.
+
+The `mapping.yaml` file already showed bare `f13-f18` without chord modifiers, but this was a documentation artifact — it used invalid X11 keysym names (`xf86tools`, `xf86launch5-9`) rather than the tool-recognized names (`f13`-`f18`), and had never been validated or flashed. The EEPROM still contained the original chord mapping.
+
+**Resolution**: Corrected `mapping.yaml` to use valid `ch57x-keyboard-tool` key names (`f13`-`f18`) and reflashed the macropad EEPROM. Bare F-keys carry no modifiers, so nothing bleeds through keyd. All `macro()` layouts immediately started working correctly.
+
+**Lesson**:
+- The EEPROM is the ground truth for what a device sends — not `mapping.yaml`. Verify the EEPROM's actual content matches intent; `mapping.yaml` can diverge silently if edited without reflashing.
+- Modifier chord keys on a keyd-intercepted device bleed through to X11 even when keyd intercepts the trigger key. Do not use Ctrl/Alt/Shift chords as macropad triggers in a combined config that also includes a full keyboard — either suppress the modifiers with `noop` bindings (conflicts with full keyboard use) or eliminate them from the EEPROM entirely.
+- `ch57x-keyboard-tool` key names (`f13`–`f18`) differ from X11 keysym names (`XF86Tools`, `XF86Launch5-9`). Always validate `mapping.yaml` with `ch57x-keyboard-tool validate` before treating it as flash-ready.
+- When diagnosing XCompose failures, compare `keyd monitor` output (what keyd emits) with `xev` output (what X11 receives). Any keys visible in `xev` but absent from `keyd monitor` originate outside keyd — in this case, the EEPROM chord modifiers.
