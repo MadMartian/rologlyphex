@@ -68,13 +68,7 @@ impl OverlayWindow {
         title_label.set_hexpand(true);
         content_box.append(&title_label);
 
-        let legend_box = FlowBox::new();
-        legend_box.set_selection_mode(gtk4::SelectionMode::None);
-        legend_box.set_homogeneous(true);
-        legend_box.set_column_spacing(8);
-        legend_box.set_row_spacing(8);
-        legend_box.set_min_children_per_line(1);
-        legend_box.set_max_children_per_line(100);
+        let legend_box = Box::new(Orientation::Vertical, 12);
         legend_box.set_halign(Align::Fill);
         legend_box.set_valign(Align::Start);
         content_box.append(&legend_box);
@@ -331,16 +325,38 @@ impl OverlayWindow {
             if let Some(legend_widget) = content_box
                 .first_child()
                 .and_then(|w| w.next_sibling())
-                .and_then(|w| w.downcast::<FlowBox>().ok())
+                .and_then(|w| w.downcast::<Box>().ok())
             {
                 while let Some(child) = legend_widget.first_child() {
                     legend_widget.remove(&child);
                 }
 
-                for button in &layout_info.buttons {
-                    let lbl = Label::new(Some(&button.display));
-                    lbl.add_css_class("overlay-legend");
-                    legend_widget.append(&lbl);
+                for group in &layout_info.groups {
+                    let group_box = Box::new(Orientation::Vertical, 4);
+                    group_box.add_css_class("overlay-group");
+                    group_box.set_valign(Align::Start);
+
+                    if let Some(label_text) = &group.label {
+                        let group_label = Label::new(Some(label_text));
+                        group_label.add_css_class("overlay-group-label");
+                        group_label.set_halign(Align::Start);
+                        group_box.append(&group_label);
+                    }
+
+                    let buttons_box = FlowBox::new();
+                    buttons_box.set_valign(Align::Start);
+                    buttons_box.set_halign(Align::Fill);
+                    buttons_box.set_selection_mode(gtk4::SelectionMode::None);
+                    buttons_box.set_min_children_per_line(1);
+                    buttons_box.set_max_children_per_line(20);
+
+                    for button in &group.buttons {
+                        let lbl = Label::new(Some(&button.display));
+                        lbl.add_css_class("overlay-legend");
+                        buttons_box.append(&lbl);
+                    }
+                    group_box.append(&buttons_box);
+                    legend_widget.append(&group_box);
                 }
             }
         } else {
@@ -351,7 +367,7 @@ impl OverlayWindow {
             if let Some(legend_widget) = content_box
                 .first_child()
                 .and_then(|w| w.next_sibling())
-                .and_then(|w| w.downcast::<FlowBox>().ok())
+                .and_then(|w| w.downcast::<Box>().ok())
             {
                 while let Some(child) = legend_widget.first_child() {
                     legend_widget.remove(&child);
@@ -426,6 +442,19 @@ impl OverlayWindow {
                 border-radius: 4px;
                 padding: 8px 12px;
                 font-size: 84px;
+            }
+            .overlay-group {
+                border: 2px solid rgba(255, 255, 255, 0.2);
+                border-radius: 6px;
+                padding: 8px;
+                margin: 4px;
+            }
+            .overlay-group-label {
+                color: rgba(255, 255, 255, 0.7);
+                font-size: 24px;
+                font-weight: bold;
+                margin-bottom: 4px;
+                margin-left: 4px;
             }
             flowboxchild {
                 padding: 0;

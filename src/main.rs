@@ -218,6 +218,9 @@ fn run_daemon(settings: Arc<AppSettings>) {
     // Flag to signal XTyper rescan after keyd reload
     let reload_flag = Arc::new(AtomicBool::new(false));
 
+    // Flag to signal config reload (and thus overlay refresh)
+    let config_reload_flag = Arc::new(AtomicBool::new(false));
+
     // GTK Application setup
     let app = Application::builder()
         .application_id("com.extollit.rologlyphex")
@@ -225,6 +228,7 @@ fn run_daemon(settings: Arc<AppSettings>) {
 
     let layout_map_clone = layout_map.clone();
     let current_layout_clone = current_layout.clone();
+    let config_reload_flag_gtk = config_reload_flag.clone();
     app.connect_activate(move |app| {
         // Hold guard keeps the app alive even when all windows are hidden.
         // Captured by the timer closure below so it lives for the app's lifetime.
@@ -235,6 +239,7 @@ fn run_daemon(settings: Arc<AppSettings>) {
         // Poll for layout changes and update window
         let current_layout = current_layout_clone.clone();
         let window_clone = window.clone();
+        let config_reload_flag = config_reload_flag_gtk.clone();
         let mut last_layout = String::from("main");
         let mut first_change = true;
 
@@ -242,16 +247,18 @@ fn run_daemon(settings: Arc<AppSettings>) {
             // Hold guard captured here -- prevents app from quitting while timer runs
             let _ = &hold;
 
+            let config_reloaded = config_reload_flag.swap(false, Ordering::Relaxed);
+
             if let Ok(layout) = current_layout.lock() {
-                if *layout != last_layout {
+                if *layout != last_layout || config_reloaded {
                     // Skip the initial /main event from keyd connect
-                    if first_change && *layout == "main" {
+                    if first_change && *layout == "main" && !config_reloaded {
                         first_change = false;
                         last_layout = layout.clone();
                         return glib::ControlFlow::Continue;
                     }
                     first_change = false;
-                    debug_log!("[🐛DEBUG] Layout changed to: {}", *layout);
+                    debug_log!("[🐛DEBUG] Layout changed to: {} (reloaded={})", *layout, config_reloaded);
                     window_clone.show_layout(&layout);
                     last_layout = layout.clone();
                 }
@@ -281,8 +288,9 @@ fn run_daemon(settings: Arc<AppSettings>) {
     let current_layout_ipc = current_layout.clone();
     let keyd_config_path_ipc = keyd_config_path.clone();
     let reload_flag_ipc = reload_flag.clone();
+    let config_reload_flag_ipc = config_reload_flag.clone();
     thread::spawn(move || {
-        if let Err(e) = ipc::listen_to_keyd(layout_map_ipc, current_layout_ipc, keyd_config_path_ipc, reload_flag_ipc) {
+        if let Err(e) = ipc::listen_to_keyd(layout_map_ipc, current_layout_ipc, keyd_config_path_ipc, reload_flag_ipc, config_reload_flag_ipc) {
             eprintln!("IPC listener error: {}", e);
         }
     });
@@ -299,8 +307,9 @@ fn run_daemon(settings: Arc<AppSettings>) {
     // Spawn inotify watcher thread
     let layout_map_watch = layout_map.clone();
     let keyd_config_path_watch = keyd_config_path.clone();
+    let config_reload_flag_watch = config_reload_flag.clone();
     thread::spawn(move || {
-        if let Err(e) = ipc::watch_config_file(layout_map_watch, &keyd_config_path_watch) {
+        if let Err(e) = ipc::watch_config_file(layout_map_watch, &keyd_config_path_watch, config_reload_flag_watch) {
             eprintln!("Config watcher error: {}", e);
         }
     });

@@ -34,9 +34,10 @@ pub fn listen_to_keyd(
     current_layout: Arc<Mutex<String>>,
     config_path: Arc<String>,
     reload_flag: Arc<AtomicBool>,
+    config_reload_flag: Arc<AtomicBool>,
 ) -> Result<(), String> {
     loop {
-        match connect_and_listen(&layout_map, &current_layout, &config_path, &reload_flag) {
+        match connect_and_listen(&layout_map, &current_layout, &config_path, &reload_flag, &config_reload_flag) {
             Ok(()) => {
                 thread::sleep(Duration::from_millis(500));
             }
@@ -53,6 +54,7 @@ fn connect_and_listen(
     current_layout: &Arc<Mutex<String>>,
     config_path: &str,
     reload_flag: &Arc<AtomicBool>,
+    config_reload_flag: &Arc<AtomicBool>,
 ) -> Result<(), String> {
     let mut stream = UnixStream::connect(KEYD_SOCKET_PATH)
         .map_err(|e| format!("Failed to connect to keyd socket: {}", e))?;
@@ -101,7 +103,7 @@ fn connect_and_listen(
 
                     if !line.is_empty() {
                         debug_log!("[🐛DEBUG] IPC line: {:?}", line);
-                        handle_layout_event(&line, layout_map, current_layout, config_path, reload_flag);
+                        handle_layout_event(&line, layout_map, current_layout, config_path, reload_flag, config_reload_flag);
                     }
                 }
             }
@@ -118,6 +120,7 @@ fn handle_layout_event(
     current_layout: &Arc<Mutex<String>>,
     config_path: &str,
     reload_flag: &Arc<AtomicBool>,
+    config_reload_flag: &Arc<AtomicBool>,
 ) {
     if let Some(layout_name) = line.strip_prefix('/') {
         // Layout change event
@@ -131,13 +134,17 @@ fn handle_layout_event(
         // If it's /main (after reload), schedule config re-parse and XTyper rescan
         if layout_name == "main" {
             debug_log!("[🐛DEBUG] Detected reload signal (/main event)");
-            reparse_config(layout_map, config_path);
+            reparse_config(layout_map, config_path, config_reload_flag.clone());
             reload_flag.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }
 
-pub fn watch_config_file(layout_map: Arc<RwLock<HashMap<String, LayoutInfo>>>, config_path: &str) -> Result<(), String> {
+pub fn watch_config_file(
+    layout_map: Arc<RwLock<HashMap<String, LayoutInfo>>>,
+    config_path: &str,
+    config_reload_flag: Arc<AtomicBool>,
+) -> Result<(), String> {
     let (tx, rx) = std::sync::mpsc::channel();
 
     let mut watcher = recommended_watcher(tx)
@@ -158,7 +165,7 @@ pub fn watch_config_file(layout_map: Arc<RwLock<HashMap<String, LayoutInfo>>>, c
                 let now = std::time::Instant::now();
                 if now.duration_since(last_reparse) > debounce_duration {
                     debug_log!("[🐛DEBUG] Config file changed, reparsing...");
-                    reparse_config(&layout_map, config_path);
+                    reparse_config(&layout_map, config_path, config_reload_flag.clone());
                     last_reparse = now;
                 }
             }
@@ -172,7 +179,11 @@ pub fn watch_config_file(layout_map: Arc<RwLock<HashMap<String, LayoutInfo>>>, c
     Ok(())
 }
 
-fn reparse_config(layout_map: &Arc<RwLock<HashMap<String, LayoutInfo>>>, config_path: &str) {
+fn reparse_config(
+    layout_map: &Arc<RwLock<HashMap<String, LayoutInfo>>>,
+    config_path: &str,
+    config_reload_flag: Arc<AtomicBool>,
+) {
     match ConfigParser::parse(config_path) {
         Ok(new_map) => {
             match layout_map.write() {
@@ -180,6 +191,7 @@ fn reparse_config(layout_map: &Arc<RwLock<HashMap<String, LayoutInfo>>>, config_
                     let count = new_map.len();
                     *map = new_map;
                     debug_log!("[🐛DEBUG] Config reparsed successfully, {} layouts loaded", count);
+                    config_reload_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 Err(e) => {
                     eprintln!("Error: layout map lock poisoned during reparse: {}", e);

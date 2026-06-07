@@ -8,7 +8,7 @@
 | 4 | Overlay window | 4.1 – 4.11 |
 | 5 | Unicode input synthesis | 5.1 – 5.7  |
 | 6 | Socket IPC | 6.1 – 6.7  |
-| 7 | Config hot reload | 7.1 – 7.3  |
+| 7 | Config hot reload | 7.1 – 7.7  |
 | 8 | App configuration | 8.1 – 8.4  |
 | 9 | Miscellaneous | 9.1        |
 
@@ -330,6 +330,25 @@
 - **Given** a new `[name:layout]` section is added to the keyd config
 - **When** the config is re-parsed
 - **Then** the new layout appears in the overlay when navigated to
+
+### 7.4 Updating the group configuration
+- **Given** the keyd config file's group information was changed
+- **When** the config is reparsed
+- **Then** the overlay updates to reflect the new group configuration
+
+### 7.5 Loading group configuration
+- **Given** the keyd config file's contains group information
+- **When** the config is parsed or reparsed
+- **Then** the group configuration is parsed and loaded from the `[ids]` section
+
+### 7.6 Anonymous group organization
+- **Given** the `keyd` configuration is parsed
+- **When** some keys do not belong to any groups 
+- **Then** the groupless keys appear in a separate group without a label
+
+### 7.7 Rendering anonymous groups
+- **When** groupless keys are rendered in the overlay
+- **Then** the groupless group is rendered first on-top, preceding named groups
 
 ## 8. App configuration
 
