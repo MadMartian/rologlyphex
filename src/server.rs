@@ -14,7 +14,7 @@ use std::sync::Arc;
 /// A single UTF-8 character is at most 4 bytes; 16 bytes is generous.
 const MAX_MESSAGE_SIZE: usize = 16;
 
-pub fn run_server(_settings: Arc<AppSettings>, reload_flag: Arc<AtomicBool>) -> Result<(), String> {
+pub fn run_server(_settings: Arc<AppSettings>, reload_flag: Arc<AtomicBool>, show_requested: Arc<AtomicBool>) -> Result<(), String> {
     let path = socket_path();
 
     if path.exists() {
@@ -56,18 +56,29 @@ pub fn run_server(_settings: Arc<AppSettings>, reload_flag: Arc<AtomicBool>) -> 
                         if text.is_empty() {
                             continue;
                         }
-                        let mut chars = text.chars();
-                        let ch = chars.next().unwrap();
-                        if chars.next().is_some() {
-                            eprintln!("Warning: received multiple characters '{}', typing only first '{}'", text, ch);
+                        if text == "show" {
+                            debug_log!("[🐛DEBUG] Show overlay requested");
+                            show_requested.store(true, Ordering::Relaxed);
+                        } else if let Some(rest) = text.strip_prefix("type ") {
+                            let mut chars = rest.chars();
+                            let ch = match chars.next() {
+                                Some(c) => c,
+                                None => {
+                                    eprintln!("Warning: 'type' command received with no character");
+                                    continue;
+                                }
+                            };
+                            if chars.next().is_some() {
+                                eprintln!("Warning: received multiple characters, typing only first '{}'", ch);
+                            }
+                            if reload_flag.swap(false, Ordering::Relaxed) {
+                                typer.rescan();
+                            }
+                            debug_log!("[🐛DEBUG] Typing: {:?}", ch);
+                            typer.type_char(ch);
+                        } else {
+                            eprintln!("Warning: unknown socket command '{}'", text);
                         }
-
-                        if reload_flag.swap(false, Ordering::Relaxed) {
-                            typer.rescan();
-                        }
-
-                        debug_log!("[🐛DEBUG] Typing: {:?}", ch);
-                        typer.type_char(ch);
                     }
                     Err(e) => {
                         eprintln!("Warning: received invalid UTF-8 ({} bytes): {}", total, e);

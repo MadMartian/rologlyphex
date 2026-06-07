@@ -28,12 +28,14 @@ macro_rules! debug_log {
 enum Mode {
     Daemon(Arc<AppSettings>),
     Type(String),
+    Show,
 }
 
 fn print_help() {
     println!("Usage:");
     println!("  rologlyphex [-c <path>] [-t <ms>] [-s <W>] [-v]   Start overlay daemon");
     println!("  rologlyphex type <char>                             Type a character via the running daemon");
+    println!("  rologlyphex show                                    Re-show the overlay in its current state");
     println!();
     println!("Daemon options (can also be set in ~/.config/rologlyphex/config.toml):");
     println!("  -c, --config <path>   Path to keyd config file");
@@ -47,8 +49,11 @@ fn parse_args() -> Mode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut iter = args.iter().peekable();
 
-    // Check for `type` subcommand
+    // Check for client subcommands
     if let Some(first) = iter.peek() {
+        if first.as_str() == "show" {
+            return Mode::Show;
+        }
         if first.as_str() == "type" {
             iter.next(); // consume "type"
             // Consume optional --verbose before the character
@@ -168,6 +173,9 @@ fn main() {
         Mode::Type(character) => {
             client::send_type(&character);
         }
+        Mode::Show => {
+            client::send_show();
+        }
         Mode::Daemon(args) => {
             run_daemon(args);
         }
@@ -213,6 +221,9 @@ fn run_daemon(settings: Arc<AppSettings>) {
     // Flag to signal config reload (and thus overlay refresh)
     let config_reload_flag = Arc::new(AtomicBool::new(false));
 
+    // Flag to signal on-demand overlay re-display
+    let show_requested = Arc::new(AtomicBool::new(false));
+
     // GTK Application setup
     let app = Application::builder()
         .application_id("com.extollit.rologlyphex")
@@ -221,6 +232,7 @@ fn run_daemon(settings: Arc<AppSettings>) {
     let layout_map_clone = layout_map.clone();
     let current_layout_clone = current_layout.clone();
     let config_reload_flag_gtk = config_reload_flag.clone();
+    let show_requested_gtk = show_requested.clone();
     app.connect_activate(move |app| {
         // Hold guard keeps the app alive even when all windows are hidden.
         // Captured by the timer closure below so it lives for the app's lifetime.
@@ -232,6 +244,7 @@ fn run_daemon(settings: Arc<AppSettings>) {
         let current_layout = current_layout_clone.clone();
         let window_clone = window.clone();
         let config_reload_flag = config_reload_flag_gtk.clone();
+        let show_requested = show_requested_gtk.clone();
         let mut last_layout = String::from("main");
         let mut first_change = true;
 
@@ -240,6 +253,7 @@ fn run_daemon(settings: Arc<AppSettings>) {
             let _ = &hold;
 
             let config_reloaded = config_reload_flag.swap(false, Ordering::Relaxed);
+            let show = show_requested.swap(false, Ordering::Relaxed);
 
             if let Ok(layout) = current_layout.lock() {
                 if *layout != last_layout || config_reloaded {
@@ -253,6 +267,9 @@ fn run_daemon(settings: Arc<AppSettings>) {
                     debug_log!("[🐛DEBUG] Layout changed to: {} (reloaded={})", *layout, config_reloaded);
                     window_clone.show_layout(&layout);
                     last_layout = layout.clone();
+                } else if show {
+                    debug_log!("[🐛DEBUG] Show overlay requested for layout: {}", last_layout);
+                    window_clone.show_layout(&last_layout);
                 }
             }
             glib::ControlFlow::Continue
@@ -290,8 +307,9 @@ fn run_daemon(settings: Arc<AppSettings>) {
     // Spawn type-command socket server thread
     let settings_server = settings.clone();
     let reload_flag_server = reload_flag.clone();
+    let show_requested_server = show_requested.clone();
     thread::spawn(move || {
-        if let Err(e) = server::run_server(settings_server, reload_flag_server) {
+        if let Err(e) = server::run_server(settings_server, reload_flag_server, show_requested_server) {
             eprintln!("Socket server error: {}", e);
         }
     });

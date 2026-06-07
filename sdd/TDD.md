@@ -5,7 +5,7 @@
 | 1 | CLI dispatch | 1.1 – 1.11 |
 | 2 | Config parsing | 2.1 – 2.15 |
 | 3 | keyd IPC | 3.1 – 3.5  |
-| 4 | Overlay window | 4.1 – 4.11 |
+| 4 | Overlay window | 4.1 – 4.14 |
 | 5 | Unicode input synthesis | 5.1 – 5.7  |
 | 6 | Socket IPC | 6.1 – 6.7  |
 | 7 | Config hot reload | 7.1 – 7.7  |
@@ -229,6 +229,21 @@
 - **Given** a layout has more button legends than fit in a single row at the configured window width
 - **When** the overlay appears
 - **Then** all button legends are visible, arranged across multiple rows
+
+### 4.12 Presenting the overlay window
+- **Given** the daemon is running and the overlay is hidden
+- **When** the user requests to show the overlay window
+- **Then** the overlay appears with the current layout's label and button legends
+
+### 4.13 Refreshing the overlay window
+- **Given** the daemon is running and the overlay is shown
+- **When** the user requests to show the overlay window
+- **Then** the timer to dismiss the overlay resets
+
+### 4.14 Request to show the overlay but the daemon is not running
+- **Given** the daemon is not running and the overlay is hidden
+- **When** the user requests to show the overlay window
+- **Then** the overlay is not shown and an error message is returned with a non-zero status
 
 ## 5. Unicode input synthesis
 

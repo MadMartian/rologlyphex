@@ -8,7 +8,7 @@ Named after Rolodex + glyphs.
 
 ## Features
 
-- **Layout overlay** — floating, click-through notification window shows the active layout and per-button characters when the knob cycles layouts
+- **Layout overlay** — floating, click-through notification window shows the active layout and per-button characters when the knob cycles layouts; can be recalled on demand via `rologlyphex show`
 - **Unicode input synthesis** — types characters into the focused X11 window using XTest + keyboard remapping (no xdotool dependency)
 - **keyd integration** — subscribes to keyd's IPC socket for real-time layout change events; parses keyd config for button legends
 - **Config file** — optional `~/.config/rologlyphex/config.toml` for persistent settings; CLI flags override file values
@@ -68,10 +68,11 @@ CLI flags always override config file values. A missing config file is not an er
 ### Client mode
 
 ```
-rologlyphex type <char>
+rologlyphex type <char>   # Send a character to the daemon for input synthesis
+rologlyphex show          # Re-display the overlay in its current state
 ```
 
-Sends a Unicode character to the running daemon for input synthesis. Used in keyd config bindings:
+`type` is used in keyd config bindings:
 
 ```ini
 f13 = command(rologlyphex type →)
@@ -110,8 +111,8 @@ src/
   settings.rs   App config file (config.toml) loading and CLI merge
   overlay.rs    GTK4 overlay window, direct Xlib FFI for WM properties
   xtype.rs      XTest input synthesis, keysym caching, keyboard remapping
-  server.rs     Unix socket listener for type commands
-  client.rs     Unix socket client for `rologlyphex type`
+  server.rs     Unix socket listener; dispatches type/show commands
+  client.rs     Unix socket client for `rologlyphex type` and `rologlyphex show`
   socket.rs     Socket path resolution (D-Bus seat detection, XDG_RUNTIME_DIR, root fallback)
   config.rs     keyd config parser, layout/button legend extraction
   ipc.rs        keyd IPC subscription, inotify config watcher
@@ -121,7 +122,7 @@ The daemon runs 4 concurrent activities:
 
 1. **GTK main loop** (main thread) — overlay window, 100ms layout-change polling
 2. **keyd IPC listener** (thread) — subscribes to layout events, reconnects on keyd restart
-3. **Socket server** (thread) — accepts `type` commands, synthesizes keypresses via XTest
+3. **Socket server** (thread) — accepts `type` and `show` commands; synthesizes keypresses via XTest or signals the GTK thread to re-display the overlay
 4. **inotify watcher** (thread) — monitors keyd config for changes
 
 ## Uninstall

@@ -4,7 +4,7 @@ use std::os::unix::net::UnixStream;
 
 use crate::socket::client_socket_path;
 
-pub fn send_type(character: &str) {
+fn send_message(msg: &str) {
     let path = match client_socket_path() {
         Some(p) => p,
         None => {
@@ -21,11 +21,19 @@ pub fn send_type(character: &str) {
         }
     };
 
-    if let Err(e) = stream.write_all(character.as_bytes()) {
-        eprintln!("Error: failed to send character: {}", e);
+    if let Err(e) = stream.write_all(msg.as_bytes()) {
+        eprintln!("Error: failed to send message: {}", e);
         std::process::exit(1);
     }
 
     // Signal end-of-message so server doesn't block waiting for more data
     let _ = stream.shutdown(Shutdown::Write);
+}
+
+pub fn send_type(character: &str) {
+    send_message(&format!("type {}\n", character));
+}
+
+pub fn send_show() {
+    send_message("show\n");
 }

@@ -75,12 +75,12 @@ The application crosses two FFI boundaries not covered by crate bindings:
 
 | Module | Thread | Responsibility |
 |--------|--------|----------------|
-| `main.rs` | main | CLI parsing, GTK `Application` setup, thread spawning, 100ms layout-change polling, panic hook for crash logging |
+| `main.rs` | main | CLI parsing (`type`, `show`, daemon modes), GTK `Application` setup, thread spawning, 100ms layout-change and show-request polling, panic hook for crash logging |
 | `settings.rs` | main | App config file loading, CLI merge, settings resolution |
 | `overlay.rs` | main | GTK4 window lifecycle, Xlib FFI for WM properties, CSS styling, font-size fallback, FlowBox legend wrapping, content-driven window height, dismiss timer |
 | `xtype.rs` | socket server | XTest key synthesis, `XChangeKeyboardMapping` for unmapped keysyms, keysym cache |
-| `server.rs` | socket server | Unix socket listener, reads character from client, delegates to `XTyper` |
-| `client.rs` | (separate process) | Connects to daemon socket, sends character, exits |
+| `server.rs` | socket server | Unix socket listener, parses verb-based messages (`type <char>`, `show`), delegates to `XTyper` or sets `show_requested` flag |
+| `client.rs` | (separate process) | Connects to daemon socket, sends verb-based message (`type <char>\n` or `show\n`), exits |
 | `socket.rs` | any | Socket path resolution (`$XDG_RUNTIME_DIR` or `/run/user/*/` scan) |
 | `config.rs` | IPC / inotify | keyd config parser, layout/button legend extraction, label resolution |
 | `ipc.rs` | IPC + inotify | keyd socket subscription (`IPC_LAYER_LISTEN`), reconnection, inotify config watcher with debounce |
@@ -94,6 +94,6 @@ The daemon runs four concurrent activities:
 3. **Socket server** (spawned thread) -- accepts connections on the `rologlyphex.sock` Unix socket, reads characters, calls `XTyper::type_str()` on its own Xlib `Display` connection
 4. **inotify watcher** (spawned thread) -- monitors the keyd config file, triggers re-parse into the shared `RwLock<HashMap<String, LayoutInfo>>`
 
-The GTK thread communicates with the IPC thread via `Arc<Mutex<String>>` (current layout name). Layout metadata is shared via `Arc<RwLock<HashMap<String, LayoutInfo>>>`, written by the IPC and inotify threads, read by the GTK thread. The IPC thread signals keyd reload events to the socket server thread via `Arc<AtomicBool>` (reload flag); the socket server checks and clears this flag before each `type_char()` call, triggering an `XTyper::rescan()` when set.
+The GTK thread communicates with the IPC thread via `Arc<Mutex<String>>` (current layout name). Layout metadata is shared via `Arc<RwLock<HashMap<String, LayoutInfo>>>`, written by the IPC and inotify threads, read by the GTK thread. The IPC thread signals keyd reload events to the socket server thread via `Arc<AtomicBool>` (reload flag); the socket server checks and clears this flag before each `type_char()` call, triggering an `XTyper::rescan()` when set. The socket server signals on-demand overlay display to the GTK thread via a second `Arc<AtomicBool>` (show flag); the GTK polling loop checks and clears it each tick, calling `show_layout` with the last-known layout name when set.
 
 The XTyper in the socket server thread has its own independent Xlib `Display` connection, separate from GTK's. This avoids thread-safety issues with Xlib (which is not thread-safe by default).
