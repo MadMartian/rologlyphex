@@ -75,7 +75,7 @@ Coding, functional, and behavioural anti-patterns encountered during development
 
 **Root cause**: All approaches depended on anti-pattern #1 — measuring geometry before GTK4 had completed layout.
 
-**Resolution**: Fixed-size window (default 600x275, configurable via `--size WxH`). Position calculated as `monitor_x + monitor_width - window_width - margin` using values known at construction time.
+**Resolution**: Width-configurable window (default 600, height calculated automatically from content). Position calculated as `monitor_x + monitor_width - window_width - margin` using values known at construction time.
 
 **Lesson**: For overlay/notification windows, prefer fixed dimensions over content-adaptive sizing. The layout timing problem is a deep GTK4 constraint, not a bug to be worked around.
 

@@ -32,13 +32,13 @@ enum Mode {
 
 fn print_help() {
     println!("Usage:");
-    println!("  rologlyphex [-c <path>] [-t <ms>] [-s <WxH>] [-v]   Start overlay daemon");
+    println!("  rologlyphex [-c <path>] [-t <ms>] [-s <W>] [-v]   Start overlay daemon");
     println!("  rologlyphex type <char>                             Type a character via the running daemon");
     println!();
     println!("Daemon options (can also be set in ~/.config/rologlyphex/config.toml):");
     println!("  -c, --config <path>   Path to keyd config file");
     println!("  -t, --timeout <ms>    Overlay dismiss timeout in milliseconds (default: 3000)");
-    println!("  -s, --size <WxH>      Overlay window size (default: 600x275)");
+    println!("  -s, --size <W>        Overlay window width (height calculated, default: 600)");
     println!("  -v, --verbose         Enable debug logging");
     println!("  -h, --help            Show this help");
 }
@@ -112,7 +112,7 @@ fn parse_args() -> Mode {
             }
             "--size" | "-s" => {
                 cli_size = Some(iter.next().unwrap_or_else(|| {
-                    eprintln!("Error: --size requires a WxH value (e.g. 600x275)");
+                    eprintln!("Error: --size requires a width value (e.g. 600)");
                     std::process::exit(1);
                 }).clone());
             }
@@ -144,7 +144,6 @@ fn parse_args() -> Mode {
 }
 
 const DEFAULT_WIDTH: i32 = 600;
-const DEFAULT_HEIGHT: i32 = 275;
 
 fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
@@ -194,22 +193,15 @@ fn run_daemon(settings: Arc<AppSettings>) {
     let keyd_config_path = Arc::new(keyd_config.clone());
     let timeout_ms = settings.timeout.unwrap_or(3000);
 
-    let (window_width, window_height) = if let Some(size_str) = &settings.size {
-        let parts: Vec<&str> = size_str.split('x').collect();
-        if parts.len() != 2 {
-            eprintln!("Error: Invalid size format '{}', must be WxH (e.g. 600x275)", size_str);
+    let window_width = if let Some(size_str) = &settings.size {
+        let width = size_str.trim().parse::<i32>().unwrap_or(-1);
+        if width <= 0 {
+            eprintln!("Error: Invalid size '{}', must be a positive integer", size_str);
             std::process::exit(1);
-        } else {
-            let w = parts[0].parse::<i32>().unwrap_or(-1);
-            let h = parts[1].parse::<i32>().unwrap_or(-1);
-            if w <= 0 || h <= 0 {
-                eprintln!("Error: Invalid dimensions '{}x{}', must be positive integers", parts[0], parts[1]);
-                std::process::exit(1);
-            }
-            (w, h)
         }
+        width
     } else {
-        (DEFAULT_WIDTH, DEFAULT_HEIGHT)
+        DEFAULT_WIDTH
     };
 
     // Shared current layout name for IPC listener to update
@@ -234,7 +226,7 @@ fn run_daemon(settings: Arc<AppSettings>) {
         // Captured by the timer closure below so it lives for the app's lifetime.
         let hold = app.hold();
 
-        let window = overlay::OverlayWindow::new(app, layout_map_clone.clone(), timeout_ms, window_width, window_height);
+        let window = overlay::OverlayWindow::new(app, layout_map_clone.clone(), timeout_ms, window_width);
 
         // Poll for layout changes and update window
         let current_layout = current_layout_clone.clone();

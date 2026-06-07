@@ -44,14 +44,14 @@ sudo usermod -aG keyd $USER
 ### Daemon mode (default)
 
 ```
-rologlyphex [-c <path>] [-t <ms>] [-s <WxH>] [-v]
+rologlyphex [-c <path>] [-t <ms>] [-s <W>] [-v]
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-c, --config <path>` | (config file or required) | Path to keyd config file |
 | `-t, --timeout <ms>` | 3000 | Overlay auto-dismiss timeout |
-| `-s, --size <WxH>` | 600x275 | Overlay window size |
+| `-s, --size <W>` | 600 | Overlay window width (height is calculated automatically) |
 | `-v, --verbose` | off | Enable debug logging |
 
 All flags can be set in `~/.config/rologlyphex/config.toml` instead:
@@ -59,7 +59,7 @@ All flags can be set in `~/.config/rologlyphex/config.toml` instead:
 ```toml
 keyd_config = "/etc/keyd/macropad.conf"
 timeout = 3000
-size = "600x275"
+size = 600
 verbose = false
 ```
 

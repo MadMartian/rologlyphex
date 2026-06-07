@@ -25,7 +25,7 @@ pub struct OverlayWindow {
 }
 
 impl OverlayWindow {
-    pub fn new(app: &Application, layout_map: Arc<RwLock<HashMap<String, LayoutInfo>>>, dismiss_timeout_ms: u64, window_width: i32, _window_height: i32) -> Self {
+    pub fn new(app: &Application, layout_map: Arc<RwLock<HashMap<String, LayoutInfo>>>, dismiss_timeout_ms: u64, window_width: i32) -> Self {
         // Verify display is available and running on X11 backend
         let display = gdk4::Display::default().unwrap_or_else(|| {
             eprintln!("Error: no display available. Ensure a graphical session is running.");
