@@ -134,4 +134,7 @@ make uninstall
 
 ## License
 
-Part of the [Macropad](../) project.
+Licensed under the [Apache License, Version 2.0](LICENSE).
+
+See [TERMS.md](TERMS.md) and [PRIVACY.md](PRIVACY.md) for terms of use and privacy policy.
+
