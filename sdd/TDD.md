@@ -35,12 +35,12 @@
 - **Then** it prints a usage message and exits with non-zero status
 
 ### 1.5 Size flag sets overlay width
-- **Given** the binary is invoked with `--size 800x300`
+- **Given** the binary is invoked with `--size 800`
 - **When** the daemon starts
-- **Then** the overlay window is created with width 800; height is content-driven and the `300` component is ignored
+- **Then** the overlay window is created with width 800; height is content-driven
 
 ### 1.6 Size flag rejects non-positive dimensions
-- **Given** the binary is invoked with `--size -1x0`
+- **Given** the binary is invoked with `--size -1`
 - **When** it starts
 - **Then** it prints an error and exits with non-zero status
 

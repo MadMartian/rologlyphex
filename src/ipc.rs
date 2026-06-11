@@ -29,16 +29,20 @@ const _: () = assert!(std::mem::size_of::<IpcMessage>() == 4112);
 /// IPC message type values from keyd's enum
 const IPC_LAYER_LISTEN: i32 = 6; // 0=SUCCESS,1=FAIL,2=BIND,3=INPUT,4=MACRO,5=RELOAD,6=LAYER_LISTEN
 
-pub fn listen_to_keyd(
-    layout_map: Arc<RwLock<HashMap<String, LayoutInfo>>>,
-    current_layout: Arc<Mutex<String>>,
-    config_path: Arc<String>,
-    reload_flag: Arc<AtomicBool>,
-    config_reload_flag: Arc<AtomicBool>,
-    last_reparse: Arc<Mutex<Instant>>,
-) -> Result<(), String> {
+/// Shared mutable state passed to both the keyd IPC and inotify threads.
+#[derive(Clone)]
+pub struct SharedState {
+    pub layout_map: Arc<RwLock<HashMap<String, LayoutInfo>>>,
+    pub current_layout: Arc<Mutex<String>>,
+    pub config_path: Arc<String>,
+    pub reload_flag: Arc<AtomicBool>,
+    pub config_reload_flag: Arc<AtomicBool>,
+    pub last_reparse: Arc<Mutex<Instant>>,
+}
+
+pub fn listen_to_keyd(state: SharedState) -> Result<(), String> {
     loop {
-        match connect_and_listen(&layout_map, &current_layout, &config_path, &reload_flag, &config_reload_flag, &last_reparse) {
+        match connect_and_listen(&state) {
             Ok(()) => {
                 thread::sleep(Duration::from_millis(500));
             }
@@ -50,14 +54,7 @@ pub fn listen_to_keyd(
     }
 }
 
-fn connect_and_listen(
-    layout_map: &Arc<RwLock<HashMap<String, LayoutInfo>>>,
-    current_layout: &Arc<Mutex<String>>,
-    config_path: &str,
-    reload_flag: &Arc<AtomicBool>,
-    config_reload_flag: &Arc<AtomicBool>,
-    last_reparse: &Arc<Mutex<Instant>>,
-) -> Result<(), String> {
+fn connect_and_listen(state: &SharedState) -> Result<(), String> {
     let mut stream = UnixStream::connect(KEYD_SOCKET_PATH)
         .map_err(|e| format!("Failed to connect to keyd socket: {}", e))?;
 
@@ -81,31 +78,35 @@ fn connect_and_listen(
 
     debug_log!("[🐛DEBUG] Connected to keyd, listening for layout changes (sent {} byte message)", msg_bytes.len());
 
-    // Read and parse incoming events with proper stream framing.
-    // Unix stream sockets do not preserve message boundaries, so we buffer
-    // incoming data and only process complete newline-terminated lines.
-    let mut buffer = [0u8; 512];
-    let mut pending = String::new();
+    // Buffer raw bytes; decode per complete newline-terminated line to avoid splitting
+    // multi-byte characters across reads (keyd names are ASCII, but be correct).
+    let mut raw_buf = [0u8; 512];
+    let mut pending: Vec<u8> = Vec::new();
 
     loop {
-        match stream.read(&mut buffer) {
+        match stream.read(&mut raw_buf) {
             Ok(0) => {
                 return Err("Connection closed by keyd".to_string());
             }
             Ok(n) => {
-                let data = String::from_utf8_lossy(&buffer[..n]);
-                debug_log!("[🐛DEBUG] IPC received {} bytes: {:?}", n, data);
+                pending.extend_from_slice(&raw_buf[..n]);
+                debug_log!("[🐛DEBUG] IPC received {} bytes", n);
 
-                pending.push_str(&data);
-
-                // Process only complete newline-terminated lines
-                while let Some(newline_idx) = pending.find('\n') {
-                    let line = pending[..newline_idx].to_string();
+                while let Some(newline_idx) = pending.iter().position(|&b| b == b'\n') {
+                    let line_bytes = pending[..newline_idx].to_vec();
                     pending.drain(..=newline_idx);
 
-                    if !line.is_empty() {
-                        debug_log!("[🐛DEBUG] IPC line: {:?}", line);
-                        handle_layout_event(&line, layout_map, current_layout, config_path, reload_flag, config_reload_flag, last_reparse);
+                    if line_bytes.is_empty() {
+                        continue;
+                    }
+                    match String::from_utf8(line_bytes) {
+                        Ok(line) => {
+                            debug_log!("[🐛DEBUG] IPC line: {:?}", line);
+                            handle_layout_event(&line, state);
+                        }
+                        Err(_) => {
+                            eprintln!("Warning: received invalid UTF-8 from keyd IPC");
+                        }
                     }
                 }
             }
@@ -116,40 +117,27 @@ fn connect_and_listen(
     }
 }
 
-fn handle_layout_event(
-    line: &str,
-    layout_map: &Arc<RwLock<HashMap<String, LayoutInfo>>>,
-    current_layout: &Arc<Mutex<String>>,
-    config_path: &str,
-    reload_flag: &Arc<AtomicBool>,
-    config_reload_flag: &Arc<AtomicBool>,
-    last_reparse: &Arc<Mutex<Instant>>,
-) {
+fn handle_layout_event(line: &str, state: &SharedState) {
     if let Some(layout_name) = line.strip_prefix('/') {
-        // Layout change event
         let layout_name = layout_name.trim();
 
-        // Update current layout for GTK thread to see
-        if let Ok(mut layout) = current_layout.lock() {
-            *layout = layout_name.to_string();
-        }
+        // M-3: recover from poisoned mutex rather than silently skipping the update
+        let mut layout = state.current_layout.lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *layout = layout_name.to_string();
+        drop(layout);
 
-        // If it's /main (after reload), schedule config re-parse and XTyper rescan
         if layout_name == "main" {
             debug_log!("[🐛DEBUG] Detected reload signal (/main event)");
-            if try_claim_reparse(last_reparse) {
-                reparse_config(layout_map, config_path, config_reload_flag.clone());
-            } else {
-                debug_log!("[🐛DEBUG] IPC /main reparse suppressed by debounce");
-            }
-            reload_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            debounced_reparse(&state.layout_map, &state.config_path, state.config_reload_flag.clone(), &state.last_reparse, "IPC /main");
+            state.reload_flag.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }
 
 pub fn watch_config_file(
     layout_map: Arc<RwLock<HashMap<String, LayoutInfo>>>,
-    config_path: &str,
+    config_path: Arc<String>,
     config_reload_flag: Arc<AtomicBool>,
     last_reparse: Arc<Mutex<Instant>>,
 ) -> Result<(), String> {
@@ -158,7 +146,7 @@ pub fn watch_config_file(
     let mut watcher = recommended_watcher(tx)
         .map_err(|e| format!("Failed to create watcher: {}", e))?;
 
-    watcher.watch(Path::new(config_path), RecursiveMode::NonRecursive)
+    watcher.watch(Path::new(config_path.as_str()), RecursiveMode::NonRecursive)
         .map_err(|e| format!("Failed to watch config: {}", e))?;
 
     debug_log!("[🐛DEBUG] Watching {} for changes", config_path);
@@ -166,12 +154,7 @@ pub fn watch_config_file(
     loop {
         match rx.recv() {
             Ok(_event) => {
-                if try_claim_reparse(&last_reparse) {
-                    debug_log!("[🐛DEBUG] Config file changed, reparsing...");
-                    reparse_config(&layout_map, config_path, config_reload_flag.clone());
-                } else {
-                    debug_log!("[🐛DEBUG] inotify reparse suppressed by debounce");
-                }
+                debounced_reparse(&layout_map, &config_path, config_reload_flag.clone(), &last_reparse, "inotify");
             }
             Err(e) => {
                 eprintln!("Watcher error: {}", e);
@@ -183,16 +166,32 @@ pub fn watch_config_file(
     Ok(())
 }
 
+/// Attempt a config reparse if the shared 200ms debounce window allows it.
+fn debounced_reparse(
+    layout_map: &Arc<RwLock<HashMap<String, LayoutInfo>>>,
+    config_path: &str,
+    config_reload_flag: Arc<AtomicBool>,
+    last_reparse: &Arc<Mutex<Instant>>,
+    source: &str,
+) {
+    if try_claim_reparse(last_reparse) {
+        debug_log!("[🐛DEBUG] {} triggered config reparse", source);
+        reparse_config(layout_map, config_path, config_reload_flag);
+    } else {
+        debug_log!("[🐛DEBUG] {} reparse suppressed by debounce", source);
+    }
+}
+
 /// Returns true and updates the timestamp if enough time has elapsed since the last reparse.
 /// Both the IPC and inotify paths call this to share a single debounce window.
 fn try_claim_reparse(last_reparse: &Arc<Mutex<Instant>>) -> bool {
     const DEBOUNCE: Duration = Duration::from_millis(200);
     let now = Instant::now();
-    if let Ok(mut last) = last_reparse.lock() {
-        if now.duration_since(*last) > DEBOUNCE {
-            *last = now;
-            return true;
-        }
+    // M-3 / ISSUES G: recover from poisoned mutex rather than permanently suppressing reparsing
+    let mut last = last_reparse.lock().unwrap_or_else(|e| e.into_inner());
+    if now.duration_since(*last) > DEBOUNCE {
+        *last = now;
+        return true;
     }
     false
 }
@@ -219,5 +218,30 @@ fn reparse_config(
         Err(e) => {
             eprintln!("Error: failed to reparse config: {}", e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_try_claim_reparse_allows_first_call() {
+        let last = Arc::new(Mutex::new(Instant::now() - Duration::from_secs(1)));
+        assert!(try_claim_reparse(&last));
+    }
+
+    #[test]
+    fn test_try_claim_reparse_suppresses_second_within_debounce() {
+        let last = Arc::new(Mutex::new(Instant::now() - Duration::from_secs(1)));
+        assert!(try_claim_reparse(&last));
+        // Immediate second call is within the 200ms window
+        assert!(!try_claim_reparse(&last));
+    }
+
+    #[test]
+    fn test_try_claim_reparse_allows_after_debounce_expires() {
+        let last = Arc::new(Mutex::new(Instant::now() - Duration::from_millis(201)));
+        assert!(try_claim_reparse(&last));
     }
 }

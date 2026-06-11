@@ -2,11 +2,10 @@ use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 
-use crate::socket::socket_path;
+use crate::socket::{socket_path, Command};
 use crate::xtype::XTyper;
 use crate::debug_log;
 
-use crate::settings::AppSettings;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -14,7 +13,7 @@ use std::sync::Arc;
 /// A single UTF-8 character is at most 4 bytes; 16 bytes is generous.
 const MAX_MESSAGE_SIZE: usize = 16;
 
-pub fn run_server(_settings: Arc<AppSettings>, reload_flag: Arc<AtomicBool>, show_requested: Arc<AtomicBool>) -> Result<(), String> {
+pub fn run_server(reload_flag: Arc<AtomicBool>, show_requested: Arc<AtomicBool>) -> Result<(), String> {
     let path = socket_path();
 
     if path.exists() {
@@ -56,28 +55,30 @@ pub fn run_server(_settings: Arc<AppSettings>, reload_flag: Arc<AtomicBool>, sho
                         if text.is_empty() {
                             continue;
                         }
-                        if text == "show" {
-                            debug_log!("[🐛DEBUG] Show overlay requested");
-                            show_requested.store(true, Ordering::Relaxed);
-                        } else if let Some(rest) = text.strip_prefix("type ") {
-                            let mut chars = rest.chars();
-                            let ch = match chars.next() {
-                                Some(c) => c,
-                                None => {
-                                    eprintln!("Warning: 'type' command received with no character");
-                                    continue;
+                        match Command::decode(text) {
+                            Some(Command::Show) => {
+                                debug_log!("[🐛DEBUG] Show overlay requested");
+                                show_requested.store(true, Ordering::Relaxed);
+                            }
+                            Some(Command::Type(ch)) => {
+                                // Warn if the payload had extra characters beyond the first
+                                if let Some(rest) = text.strip_prefix("type ") {
+                                    if rest.chars().count() > 1 {
+                                        eprintln!("Warning: received multiple characters, typing only first '{}'", ch);
+                                    }
                                 }
-                            };
-                            if chars.next().is_some() {
-                                eprintln!("Warning: received multiple characters, typing only first '{}'", ch);
+                                // Rescan must precede type_char to pick up any keyd reload
+                                if reload_flag.swap(false, Ordering::Relaxed) {
+                                    typer.rescan();
+                                }
+                                debug_log!("[🐛DEBUG] Typing: {:?}", ch);
+                                if let Err(e) = typer.type_char(ch) {
+                                    eprintln!("Error: failed to type '{}': {}", ch, e);
+                                }
                             }
-                            if reload_flag.swap(false, Ordering::Relaxed) {
-                                typer.rescan();
+                            None => {
+                                eprintln!("Warning: unknown socket command '{}'", text);
                             }
-                            debug_log!("[🐛DEBUG] Typing: {:?}", ch);
-                            typer.type_char(ch);
-                        } else {
-                            eprintln!("Warning: unknown socket command '{}'", text);
                         }
                     }
                     Err(e) => {

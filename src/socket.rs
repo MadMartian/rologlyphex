@@ -5,6 +5,32 @@ use dbus::blocking::Connection;
 
 const SOCKET_NAME: &str = "rologlyphex.sock";
 
+/// Typed socket commands, shared by client (encode) and server (decode).
+pub enum Command {
+    Type(char),
+    Show,
+}
+
+impl Command {
+    pub fn encode(&self) -> String {
+        match self {
+            Command::Type(ch) => format!("type {}\n", ch),
+            Command::Show => "show\n".to_string(),
+        }
+    }
+
+    pub fn decode(s: &str) -> Option<Command> {
+        let s = s.trim();
+        if s == "show" {
+            Some(Command::Show)
+        } else if let Some(rest) = s.strip_prefix("type ") {
+            rest.chars().next().map(Command::Type)
+        } else {
+            None
+        }
+    }
+}
+
 fn active_seat0_uid() -> Option<u32> {
     let conn = Connection::new_system().ok()?;
     let proxy = conn.with_proxy("org.freedesktop.login1", "/org/freedesktop/login1", Duration::from_millis(2000));
@@ -37,9 +63,9 @@ fn active_seat0_uid() -> Option<u32> {
 }
 
 pub fn socket_path() -> PathBuf {
-    // Use a fixed path in XDG_RUNTIME_DIR so both daemon (user session) and
-    // CLI client (possibly run as root by keyd) can agree on the location.
-    // The daemon creates the socket; the client just needs to know the path.
+    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
+        return PathBuf::from(dir).join(SOCKET_NAME);
+    }
     let uid = unsafe { libc::getuid() };
     PathBuf::from(format!("/run/user/{}/{}", uid, SOCKET_NAME))
 }

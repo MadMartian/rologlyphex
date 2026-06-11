@@ -5,11 +5,24 @@ use gtk4::prelude::*;
 use gtk4::{Align, Application, ApplicationWindow, Box, CssProvider, FlowBox, Label, Orientation};
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::ffi::c_ulong;
 use std::rc::Rc;
 use std::sync::{Arc, RwLock};
 
 const WINDOW_MARGIN: i32 = 20;
+
+struct MonitorGeometry {
+    x: i32,
+    y: i32,
+    width: i32,
+    #[allow(dead_code)]
+    height: i32,
+}
+
+impl MonitorGeometry {
+    fn fallback() -> Self {
+        MonitorGeometry { x: 0, y: 0, width: 1920, height: 1080 }
+    }
+}
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -49,9 +62,9 @@ impl OverlayWindow {
         window.set_can_focus(false);
         window.set_can_target(false);
 
-        let (mon_x, mon_y, mon_w, _mon_h) = Self::find_rightmost_monitor();
-        let target_x = Rc::new(Cell::new(mon_x + mon_w - window_width - WINDOW_MARGIN));
-        let target_y = Rc::new(Cell::new(mon_y + WINDOW_MARGIN));
+        let mon = Self::find_rightmost_monitor();
+        let target_x = Rc::new(Cell::new(mon.x + mon.width - window_width - WINDOW_MARGIN));
+        let target_y = Rc::new(Cell::new(mon.y + WINDOW_MARGIN));
 
         // Content
         let content_box = Box::new(Orientation::Vertical, 12);
@@ -96,9 +109,9 @@ impl OverlayWindow {
         let ww = window_width;
         let monitors = display.monitors();
         monitors.connect_items_changed(move |_, _, _, _| {
-            let (mx, my, mw, _mh) = Self::find_rightmost_monitor();
-            let new_x = mx + mw - ww - WINDOW_MARGIN;
-            let new_y = my + WINDOW_MARGIN;
+            let mon = Self::find_rightmost_monitor();
+            let new_x = mon.x + mon.width - ww - WINDOW_MARGIN;
+            let new_y = mon.y + WINDOW_MARGIN;
             tx_hotplug.set(new_x);
             ty_hotplug.set(new_y);
             debug_log!("[🐛DEBUG] Monitor change detected, new overlay position: ({}, {})", new_x, new_y);
@@ -144,11 +157,7 @@ impl OverlayWindow {
             None => return,
         };
 
-        let xid = unsafe {
-            let surface_ptr = surface.as_ptr();
-            gdk_x11_surface_get_xid(surface_ptr as *mut _)
-        };
-
+        let xid = unsafe { gdk_x11_surface_get_xid(surface.as_ptr() as *mut _) };
         if xid == 0 {
             debug_log!("[🐛DEBUG] Failed to get X11 window ID");
             return;
@@ -162,57 +171,49 @@ impl OverlayWindow {
             }
         };
 
-        let xdisplay = unsafe {
-            gdk_x11_display_get_xdisplay(display.as_ptr() as *mut _)
-        };
-
+        let xdisplay = unsafe { gdk_x11_display_get_xdisplay(display.as_ptr() as *mut _) };
         if xdisplay.is_null() {
             eprintln!("Error: failed to get X11 display pointer (is the X11 backend active?)");
             return;
         }
 
+        // Intern atoms
+        let (wm_type, type_notification, wm_state, state_above,
+             state_skip_taskbar, state_skip_pager, state_sticky,
+             wm_user_time, wm_desktop, kde_activities, xa_string) = unsafe {
+            (
+                x11::xlib::XInternAtom(xdisplay, b"_NET_WM_WINDOW_TYPE\0".as_ptr() as *const _, 0),
+                x11::xlib::XInternAtom(xdisplay, b"_NET_WM_WINDOW_TYPE_NOTIFICATION\0".as_ptr() as *const _, 0),
+                x11::xlib::XInternAtom(xdisplay, b"_NET_WM_STATE\0".as_ptr() as *const _, 0),
+                x11::xlib::XInternAtom(xdisplay, b"_NET_WM_STATE_ABOVE\0".as_ptr() as *const _, 0),
+                x11::xlib::XInternAtom(xdisplay, b"_NET_WM_STATE_SKIP_TASKBAR\0".as_ptr() as *const _, 0),
+                x11::xlib::XInternAtom(xdisplay, b"_NET_WM_STATE_SKIP_PAGER\0".as_ptr() as *const _, 0),
+                x11::xlib::XInternAtom(xdisplay, b"_NET_WM_STATE_STICKY\0".as_ptr() as *const _, 0),
+                x11::xlib::XInternAtom(xdisplay, b"_NET_WM_USER_TIME\0".as_ptr() as *const _, 0),
+                x11::xlib::XInternAtom(xdisplay, b"_NET_WM_DESKTOP\0".as_ptr() as *const _, 0),
+                x11::xlib::XInternAtom(xdisplay, b"_KDE_NET_WM_ACTIVITIES\0".as_ptr() as *const _, 0),
+                x11::xlib::XInternAtom(xdisplay, b"STRING\0".as_ptr() as *const _, 0),
+            )
+        };
+
+        // Set window type and state properties
         unsafe {
-            // Intern atoms
-            let wm_type = x11::xlib::XInternAtom(xdisplay, b"_NET_WM_WINDOW_TYPE\0".as_ptr() as *const _, 0);
-            let type_notification = x11::xlib::XInternAtom(xdisplay, b"_NET_WM_WINDOW_TYPE_NOTIFICATION\0".as_ptr() as *const _, 0);
-            let wm_state = x11::xlib::XInternAtom(xdisplay, b"_NET_WM_STATE\0".as_ptr() as *const _, 0);
-            let state_above = x11::xlib::XInternAtom(xdisplay, b"_NET_WM_STATE_ABOVE\0".as_ptr() as *const _, 0);
-            let state_skip_taskbar = x11::xlib::XInternAtom(xdisplay, b"_NET_WM_STATE_SKIP_TASKBAR\0".as_ptr() as *const _, 0);
-            let state_skip_pager = x11::xlib::XInternAtom(xdisplay, b"_NET_WM_STATE_SKIP_PAGER\0".as_ptr() as *const _, 0);
-            let state_sticky = x11::xlib::XInternAtom(xdisplay, b"_NET_WM_STATE_STICKY\0".as_ptr() as *const _, 0);
-
-            // Set _NET_WM_WINDOW_TYPE = NOTIFICATION
             let type_data: [x11::xlib::Atom; 1] = [type_notification];
-            x11::xlib::XChangeProperty(
-                xdisplay, xid, wm_type,
-                x11::xlib::XA_ATOM, 32,
-                x11::xlib::PropModeReplace,
-                type_data.as_ptr() as *const u8,
-                1,
-            );
+            x11::xlib::XChangeProperty(xdisplay, xid, wm_type,
+                x11::xlib::XA_ATOM, 32, x11::xlib::PropModeReplace,
+                type_data.as_ptr() as *const u8, 1);
 
-            // Set _NET_WM_STATE = ABOVE | SKIP_TASKBAR | SKIP_PAGER | STICKY
-            let state_data: [x11::xlib::Atom; 4] = [state_above, state_skip_taskbar, state_skip_pager, state_sticky];
-            x11::xlib::XChangeProperty(
-                xdisplay, xid, wm_state,
-                x11::xlib::XA_ATOM, 32,
-                x11::xlib::PropModeReplace,
-                state_data.as_ptr() as *const u8,
-                4,
-            );
+            let state_data: [x11::xlib::Atom; 4] =
+                [state_above, state_skip_taskbar, state_skip_pager, state_sticky];
+            x11::xlib::XChangeProperty(xdisplay, xid, wm_state,
+                x11::xlib::XA_ATOM, 32, x11::xlib::PropModeReplace,
+                state_data.as_ptr() as *const u8, 4);
 
-            // Prevent focus stealing by setting _NET_WM_USER_TIME to 0
-            let wm_user_time = x11::xlib::XInternAtom(xdisplay, b"_NET_WM_USER_TIME\0".as_ptr() as *const _, 0);
-            let user_time_data: [std::ffi::c_long; 1] = [0];
-            x11::xlib::XChangeProperty(
-                xdisplay, xid, wm_user_time,
-                x11::xlib::XA_CARDINAL, 32,
-                x11::xlib::PropModeReplace,
-                user_time_data.as_ptr() as *const u8,
-                1,
-            );
+            let user_time: [std::ffi::c_long; 1] = [0];
+            x11::xlib::XChangeProperty(xdisplay, xid, wm_user_time,
+                x11::xlib::XA_CARDINAL, 32, x11::xlib::PropModeReplace,
+                user_time.as_ptr() as *const u8, 1);
 
-            // Set WM_HINTS to tell the WM not to focus this window
             let hints = x11::xlib::XAllocWMHints();
             if !hints.is_null() {
                 (*hints).flags = x11::xlib::InputHint;
@@ -221,70 +222,37 @@ impl OverlayWindow {
                 x11::xlib::XFree(hints as *mut _);
             }
 
-            // Set _NET_WM_DESKTOP = 0xFFFFFFFF = show on all virtual desktops
-            let wm_desktop = x11::xlib::XInternAtom(xdisplay, b"_NET_WM_DESKTOP\0".as_ptr() as *const _, 0);
             let all_desktops: [std::ffi::c_long; 1] = [0xFFFFFFFFu32 as std::ffi::c_long];
-            x11::xlib::XChangeProperty(
-                xdisplay, xid, wm_desktop,
-                x11::xlib::XA_CARDINAL, 32,
-                x11::xlib::PropModeReplace,
-                all_desktops.as_ptr() as *const u8,
-                1,
-            );
+            x11::xlib::XChangeProperty(xdisplay, xid, wm_desktop,
+                x11::xlib::XA_CARDINAL, 32, x11::xlib::PropModeReplace,
+                all_desktops.as_ptr() as *const u8, 1);
 
-            // Set _KDE_NET_WM_ACTIVITIES to empty string = show on all virtual activities
-            let kde_activities = x11::xlib::XInternAtom(xdisplay, b"_KDE_NET_WM_ACTIVITIES\0".as_ptr() as *const _, 0);
-            let xa_string = x11::xlib::XInternAtom(xdisplay, b"STRING\0".as_ptr() as *const _, 0);
-            x11::xlib::XChangeProperty(
-                xdisplay, xid, kde_activities,
-                xa_string, 8,
-                x11::xlib::PropModeReplace,
-                std::ptr::null(),
-                0,
-            );
+            x11::xlib::XChangeProperty(xdisplay, xid, kde_activities,
+                xa_string, 8, x11::xlib::PropModeReplace,
+                std::ptr::null(), 0);
+        }
 
-            // Send ClientMessages to Root Window (required by EWMH for already mapped windows)
-            let root = x11::xlib::XDefaultRootWindow(xdisplay);
-            let mask = x11::xlib::SubstructureRedirectMask | x11::xlib::SubstructureNotifyMask;
+        // Send EWMH ClientMessages to root (required for already-mapped windows)
+        let root = unsafe { x11::xlib::XDefaultRootWindow(xdisplay) };
+        let mask = x11::xlib::SubstructureRedirectMask | x11::xlib::SubstructureNotifyMask;
 
-            fn send_wm_add(xid: &x11::xlib::Window, wm_state: &x11::xlib::Atom, one: &x11::xlib::Atom, two: &x11::xlib::Atom,
-                           xdisplay: *mut x11::xlib::Display, root: c_ulong, mask: std::os::raw::c_long) {
-                unsafe {
-                    let _net_wm_state_add = 1;
-                    let mut ev_state1: x11::xlib::XEvent = std::mem::zeroed();
-                    ev_state1.type_ = x11::xlib::ClientMessage;
-                    ev_state1.client_message.window = *xid;
-                    ev_state1.client_message.message_type = *wm_state;
-                    ev_state1.client_message.format = 32;
-                    let data_ptr = &mut ev_state1.client_message.data as *mut _ as *mut std::ffi::c_long;
-                    std::ptr::write(data_ptr.add(0), _net_wm_state_add);
-                    std::ptr::write(data_ptr.add(1), *one as std::ffi::c_long);
-                    std::ptr::write(data_ptr.add(2), *two as std::ffi::c_long);
-                    std::ptr::write(data_ptr.add(3), 1); // source indication
-                    x11::xlib::XSendEvent(xdisplay, root, 0, mask, &mut ev_state1);
-                }
-            }
+        unsafe {
+            let mut ev: x11::xlib::XEvent = std::mem::zeroed();
+            ev.type_ = x11::xlib::ClientMessage;
+            ev.client_message.window = xid;
+            ev.client_message.message_type = wm_desktop;
+            ev.client_message.format = 32;
+            let p = &mut ev.client_message.data as *mut _ as *mut std::ffi::c_long;
+            std::ptr::write(p.add(0), 0xFFFFFFFFu32 as std::ffi::c_long);
+            std::ptr::write(p.add(1), 1);
+            x11::xlib::XSendEvent(xdisplay, root, 0, mask, &mut ev);
+        }
 
-            // 1. Send _NET_WM_DESKTOP ClientMessage
-            let mut ev_desktop: x11::xlib::XEvent = std::mem::zeroed();
-            ev_desktop.type_ = x11::xlib::ClientMessage;
-            ev_desktop.client_message.window = xid;
-            ev_desktop.client_message.message_type = wm_desktop;
-            ev_desktop.client_message.format = 32;
-            let data_ptr = &mut ev_desktop.client_message.data as *mut _ as *mut std::ffi::c_long;
-            std::ptr::write(data_ptr.add(0), 0xFFFFFFFFu32 as std::ffi::c_long); // 0xFFFFFFFF = all desktops
-            std::ptr::write(data_ptr.add(1), 1); // source indication = normal application
-            x11::xlib::XSendEvent(xdisplay, root, 0, mask, &mut ev_desktop);
+        send_wm_add(xdisplay, root, mask, xid, wm_state, state_above, state_sticky);
+        send_wm_add(xdisplay, root, mask, xid, wm_state, state_skip_taskbar, state_skip_pager);
 
-            // 2. Send _NET_WM_STATE ClientMessage for ABOVE and STICKY
-            send_wm_add(&xid, &wm_state, &state_above, &state_sticky, xdisplay, root, mask);
-
-            // 3. Send _NET_WM_STATE ClientMessage for SKIP_TASKBAR and SKIP_PAGER
-            send_wm_add(&xid, &wm_state, &state_skip_taskbar, &state_skip_pager, xdisplay, root, mask);
-
-            // Position the window
+        unsafe {
             x11::xlib::XMoveWindow(xdisplay, xid, target_x, target_y);
-
             x11::xlib::XFlush(xdisplay);
         }
 
@@ -391,17 +359,17 @@ impl OverlayWindow {
         );
     }
 
-    fn find_rightmost_monitor() -> (i32, i32, i32, i32) {
+    fn find_rightmost_monitor() -> MonitorGeometry {
         let display = match gdk4::Display::default() {
             Some(d) => d,
             None => {
-                eprintln!("Error: no display available for monitor enumeration");
-                return (0, 0, 1920, 1080);
+                eprintln!("Error: no display available for monitor enumeration; using 1920x1080 fallback");
+                return MonitorGeometry::fallback();
             }
         };
         let monitors = display.monitors();
 
-        let mut best: Option<(i32, i32, i32, i32)> = None;
+        let mut best: Option<MonitorGeometry> = None;
         let mut max_x = i32::MIN;
 
         for i in 0..monitors.n_items() {
@@ -411,13 +379,21 @@ impl OverlayWindow {
                     let x_end = geom.x() + geom.width();
                     if x_end > max_x {
                         max_x = x_end;
-                        best = Some((geom.x(), geom.y(), geom.width(), geom.height()));
+                        best = Some(MonitorGeometry {
+                            x: geom.x(),
+                            y: geom.y(),
+                            width: geom.width(),
+                            height: geom.height(),
+                        });
                     }
                 }
             }
         }
 
-        best.unwrap_or((0, 0, 1920, 1080))
+        best.unwrap_or_else(|| {
+            eprintln!("Error: no monitors found; using 1920x1080 fallback");
+            MonitorGeometry::fallback()
+        })
     }
 
     fn apply_css() {
@@ -478,6 +454,32 @@ impl OverlayWindow {
             &provider,
             gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
+    }
+}
+
+/// Send a _NET_WM_STATE ClientMessage to the root window to add two state atoms.
+/// Required by EWMH for windows that are already mapped.
+fn send_wm_add(
+    xdisplay: *mut x11::xlib::Display,
+    root: x11::xlib::Window,
+    mask: std::os::raw::c_long,
+    xid: x11::xlib::Window,
+    wm_state: x11::xlib::Atom,
+    one: x11::xlib::Atom,
+    two: x11::xlib::Atom,
+) {
+    unsafe {
+        let mut ev: x11::xlib::XEvent = std::mem::zeroed();
+        ev.type_ = x11::xlib::ClientMessage;
+        ev.client_message.window = xid;
+        ev.client_message.message_type = wm_state;
+        ev.client_message.format = 32;
+        let p = &mut ev.client_message.data as *mut _ as *mut std::ffi::c_long;
+        std::ptr::write(p.add(0), 1); // _NET_WM_STATE_ADD
+        std::ptr::write(p.add(1), one as std::ffi::c_long);
+        std::ptr::write(p.add(2), two as std::ffi::c_long);
+        std::ptr::write(p.add(3), 1); // source indication
+        x11::xlib::XSendEvent(xdisplay, root, 0, mask, &mut ev);
     }
 }
 

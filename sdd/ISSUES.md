@@ -6,6 +6,10 @@
 | E | Caps Lock active causes wrong character output (XKB/core mapping mismatch) | Medium |
 | B | 100ms polling latency | Low |
 | D | Non-BMP characters (emoji) produce wrong output in Java/AWT-based applications | Medium |
+| F | /main IPC event fires on layer navigation, not only on keyd reload | Low |
+| G | Poisoned last_reparse mutex permanently disables hot-reload | Low (unreachable in practice) |
+| H | Root-context socket discovery is vulnerable to TOCTOU via /run/user/* scan | Medium |
+| I | No XSetErrorHandler — any X protocol error silently exit()s the daemon | Medium |
 
 ## A. Keycode pool depletion across restarts
 
@@ -59,4 +63,36 @@ When Caps Lock is active, characters typed via rologlyphex produce wrong output.
 - Use `XkbSetMap` to write the keysym into the XKB table alongside the core mapping
 
 **Mitigation**: Turn off Caps Lock before using macropad character layouts.
+
+## F. /main IPC event fires on layer navigation, not only on keyd reload
+
+**Severity**: Low (wasteful, not harmful)
+
+keyd's `IPC_LAYER_LISTEN` protocol sends the active layer name on every layer change, including returning to the main layer via `setlayout(main)`. The daemon treats every `/main` event as a reload signal: it attempts a config reparse (throttled by the 200ms shared debounce) and sets the XTyper `reload_flag` (triggering `XTyper::rescan()` before the next `type_char()` call). On reload, this is correct behavior. On normal navigation back to main, it is wasteful — a disk read and an X-server round trip happen unnecessarily.
+
+**Mitigation**: Distinguish reload events from navigation events — keyd may expose a separate `IPC_RELOAD` event type, or the daemon could track whether a config file modification preceded the `/main` event (e.g., check a flag set by inotify). Until then, the 200ms debounce limits the blast radius.
+
+## G. Poisoned last_reparse mutex permanently disables hot-reload
+
+**Severity**: Low (unreachable in practice)
+
+If the `Arc<Mutex<Instant>>` shared debounce mutex were poisoned (i.e., a thread panicked while holding it), `try_claim_reparse()` would permanently return `false` via the `if let Ok(...)` guard, silently disabling config hot-reload for the rest of the session. In practice this is unreachable — the only operation under the lock is an `Instant::now()` assignment, which cannot panic. The silent failure mode is the concern.
+
+**Mitigation**: Replace `if let Ok(mut last) = last_reparse.lock()` with `.unwrap_or_else(|e| e.into_inner())` to recover from poisoning rather than silently suppressing all future parses.
+
+## H. Root-context socket discovery is vulnerable to TOCTOU via /run/user/* scan
+
+**Severity**: Medium
+
+When `rologlyphex type` is invoked as root (no `XDG_RUNTIME_DIR`), `socket.rs:65-72` scans `/run/user/*/rologlyphex.sock` and connects to the first matching path. The seat0 check (`socket.rs:44`) runs separately, but path discovery uses `exists()` which is a TOCTOU race — a local unprivileged user can plant a socket or symlink at a matching path between the check and the connect. A malicious socket could cause glyph mis-delivery (wrong characters typed) or act as a DoS against root-invoked type commands. Root-to-user privilege boundary is the bounded threat; this does not grant the attacker arbitrary root execution.
+
+**Mitigation**: Derive the socket path directly from the validated seat0 UID (obtained via the D-Bus login1 query) rather than scanning the filesystem. Then `lstat` the resolved path and verify `S_ISSOCK` and UID ownership before connecting.
+
+## I. No XSetErrorHandler — X protocol errors silently exit() the daemon
+
+**Severity**: Medium
+
+The daemon makes no call to `XSetErrorHandler` or `XSetIOErrorHandler`. If the X server sends an error response to any Xlib call (e.g., `BadWindow` on a destroyed overlay window, `BadAccess` on a keycode already mapped by another client), Xlib's default error handler calls `exit()`. This bypasses Rust's panic hook, produces no log entry, and leaves the daemon socket in place — subsequent `rologlyphex type` calls will connect but get no response until the stale socket times out.
+
+**Mitigation**: Install a custom `XSetErrorHandler` that logs the error details and returns (non-fatal for recoverable errors), and an `XSetIOErrorHandler` that performs a clean shutdown.
 

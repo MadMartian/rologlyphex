@@ -26,8 +26,20 @@ macro_rules! debug_log {
     };
 }
 
+/// Returns the first char of `s`, or `None` if empty.
+/// Prints a warning to stderr if `s` contains more than one character.
+pub fn first_char_of(s: &str, context: &str) -> Option<char> {
+    let mut chars = s.chars();
+    let ch = chars.next();
+    if ch.is_some() && chars.next().is_some() {
+        eprintln!("Warning: {} '{}' has extra characters, using first only", context, s);
+    }
+    ch
+}
+
+// Mode::Daemon carries the validated keyd_config path so run_daemon never needs to unwrap.
 enum Mode {
-    Daemon(Arc<AppSettings>),
+    Daemon(Arc<AppSettings>, String),
     Type(String),
     Show,
 }
@@ -67,17 +79,10 @@ fn parse_args() -> Mode {
                 }
             }
             if let Some(arg) = iter.next() {
-                let mut chars = arg.chars();
-                let first_char = match chars.next() {
-                    Some(c) => c,
-                    None => {
-                        eprintln!("Error: 'type' argument must be exactly one Unicode character");
-                        std::process::exit(1);
-                    }
-                };
-                if chars.next().is_some() {
-                    eprintln!("Warning: 'type' accepts exactly one character, ignoring extra characters in '{}'", arg);
-                }
+                let first_char = first_char_of(arg, "'type' argument").unwrap_or_else(|| {
+                    eprintln!("Error: 'type' argument must be exactly one Unicode character");
+                    std::process::exit(1);
+                });
                 return Mode::Type(first_char.to_string());
             } else {
                 eprintln!("Error: 'type' requires a character argument");
@@ -140,13 +145,16 @@ fn parse_args() -> Mode {
         DEBUG_ENABLED.store(true, Ordering::Relaxed);
     }
 
-    if settings.keyd_config.is_none() {
-        eprintln!("Error: keyd config path must be specified via --config or in config.toml");
-        print_help();
-        std::process::exit(1);
-    }
+    let keyd_config = match settings.keyd_config.clone() {
+        Some(p) => p,
+        None => {
+            eprintln!("Error: keyd config path must be specified via --config or in config.toml");
+            print_help();
+            std::process::exit(1);
+        }
+    };
 
-    Mode::Daemon(Arc::new(settings))
+    Mode::Daemon(Arc::new(settings), keyd_config)
 }
 
 const DEFAULT_WIDTH: i32 = 600;
@@ -177,17 +185,15 @@ fn main() {
         Mode::Show => {
             client::send_show();
         }
-        Mode::Daemon(args) => {
-            run_daemon(args);
+        Mode::Daemon(args, keyd_config) => {
+            run_daemon(args, keyd_config);
         }
     }
 }
 
-fn run_daemon(settings: Arc<AppSettings>) {
-    let keyd_config = settings.keyd_config.as_ref().unwrap();
-
+fn run_daemon(settings: Arc<AppSettings>, keyd_config: String) {
     // Parse config at startup
-    let layout_map = match config::ConfigParser::parse(keyd_config) {
+    let layout_map = match config::ConfigParser::parse(&keyd_config) {
         Ok(map) => {
             debug_log!("[🐛DEBUG] Parsed {} layouts from {}", map.len(), keyd_config);
             map
@@ -199,7 +205,6 @@ fn run_daemon(settings: Arc<AppSettings>) {
     };
 
     let layout_map = Arc::new(RwLock::new(layout_map));
-    let keyd_config_path = Arc::new(keyd_config.clone());
     let timeout_ms = settings.timeout.unwrap_or(3000);
 
     let window_width = if let Some(size_str) = &settings.size {
@@ -213,41 +218,37 @@ fn run_daemon(settings: Arc<AppSettings>) {
         DEFAULT_WIDTH
     };
 
-    // Shared current layout name for IPC listener to update
-    let current_layout = Arc::new(Mutex::new(String::from("main")));
-
-    // Flag to signal XTyper rescan after keyd reload
-    let reload_flag = Arc::new(AtomicBool::new(false));
-
-    // Flag to signal config reload (and thus overlay refresh)
-    let config_reload_flag = Arc::new(AtomicBool::new(false));
+    // Shared state accessed by multiple threads
+    let shared = ipc::SharedState {
+        layout_map: layout_map.clone(),
+        current_layout: Arc::new(Mutex::new(String::from("main"))),
+        config_path: Arc::new(keyd_config),
+        reload_flag: Arc::new(AtomicBool::new(false)),
+        config_reload_flag: Arc::new(AtomicBool::new(false)),
+        last_reparse: Arc::new(Mutex::new(Instant::now())),
+    };
 
     // Flag to signal on-demand overlay re-display
     let show_requested = Arc::new(AtomicBool::new(false));
-
-    // Shared debounce timestamp for config reparse (inotify + IPC paths share one window)
-    let last_reparse = Arc::new(Mutex::new(Instant::now()));
 
     // GTK Application setup
     let app = Application::builder()
         .application_id("com.extollit.rologlyphex")
         .build();
 
-    let layout_map_clone = layout_map.clone();
-    let current_layout_clone = current_layout.clone();
-    let config_reload_flag_gtk = config_reload_flag.clone();
+    let shared_gtk = shared.clone();
     let show_requested_gtk = show_requested.clone();
     app.connect_activate(move |app| {
         // Hold guard keeps the app alive even when all windows are hidden.
         // Captured by the timer closure below so it lives for the app's lifetime.
         let hold = app.hold();
 
-        let window = overlay::OverlayWindow::new(app, layout_map_clone.clone(), timeout_ms, window_width);
+        let window = overlay::OverlayWindow::new(app, shared_gtk.layout_map.clone(), timeout_ms, window_width);
 
         // Poll for layout changes and update window
-        let current_layout = current_layout_clone.clone();
+        let current_layout = shared_gtk.current_layout.clone();
         let window_clone = window.clone();
-        let config_reload_flag = config_reload_flag_gtk.clone();
+        let config_reload_flag = shared_gtk.config_reload_flag.clone();
         let show_requested = show_requested_gtk.clone();
         let mut last_layout = String::from("main");
         let mut first_change = true;
@@ -259,23 +260,25 @@ fn run_daemon(settings: Arc<AppSettings>) {
             let config_reloaded = config_reload_flag.swap(false, Ordering::Relaxed);
             let show = show_requested.swap(false, Ordering::Relaxed);
 
-            if let Ok(layout) = current_layout.lock() {
-                if *layout != last_layout || config_reloaded {
-                    // Skip the initial /main event from keyd connect
-                    if first_change && *layout == "main" && !config_reloaded {
-                        first_change = false;
-                        last_layout = layout.clone();
-                        return glib::ControlFlow::Continue;
-                    }
+            // M-3: recover from poisoned mutex rather than silently freezing the poll loop
+            let layout = current_layout.lock().unwrap_or_else(|e| e.into_inner());
+            if *layout != last_layout || config_reloaded {
+                // Skip the initial /main event from keyd connect
+                if first_change && *layout == "main" && !config_reloaded {
                     first_change = false;
-                    debug_log!("[🐛DEBUG] Layout changed to: {} (reloaded={})", *layout, config_reloaded);
-                    window_clone.show_layout(&layout);
                     last_layout = layout.clone();
-                } else if show {
-                    debug_log!("[🐛DEBUG] Show overlay requested for layout: {}", last_layout);
-                    window_clone.show_layout(&last_layout);
+                    return glib::ControlFlow::Continue;
                 }
+                first_change = false;
+                debug_log!("[🐛DEBUG] Layout changed to: {} (reloaded={})", *layout, config_reloaded);
+                window_clone.show_layout(&layout);
+                last_layout = layout.clone();
+            } else if show {
+                debug_log!("[🐛DEBUG] Show overlay requested for layout: {}", last_layout);
+                window_clone.show_layout(&last_layout);
             }
+            drop(layout);
+
             glib::ControlFlow::Continue
         });
 
@@ -297,35 +300,30 @@ fn run_daemon(settings: Arc<AppSettings>) {
     });
 
     // Spawn IPC listener thread
-    let layout_map_ipc = layout_map.clone();
-    let current_layout_ipc = current_layout.clone();
-    let keyd_config_path_ipc = keyd_config_path.clone();
-    let reload_flag_ipc = reload_flag.clone();
-    let config_reload_flag_ipc = config_reload_flag.clone();
-    let last_reparse_ipc = last_reparse.clone();
+    let shared_ipc = shared.clone();
     thread::spawn(move || {
-        if let Err(e) = ipc::listen_to_keyd(layout_map_ipc, current_layout_ipc, keyd_config_path_ipc, reload_flag_ipc, config_reload_flag_ipc, last_reparse_ipc) {
+        if let Err(e) = ipc::listen_to_keyd(shared_ipc) {
             eprintln!("IPC listener error: {}", e);
         }
     });
 
     // Spawn type-command socket server thread
-    let settings_server = settings.clone();
-    let reload_flag_server = reload_flag.clone();
+    let reload_flag_server = shared.reload_flag.clone();
     let show_requested_server = show_requested.clone();
     thread::spawn(move || {
-        if let Err(e) = server::run_server(settings_server, reload_flag_server, show_requested_server) {
+        if let Err(e) = server::run_server(reload_flag_server, show_requested_server) {
             eprintln!("Socket server error: {}", e);
         }
     });
 
     // Spawn inotify watcher thread
-    let layout_map_watch = layout_map.clone();
-    let keyd_config_path_watch = keyd_config_path.clone();
-    let config_reload_flag_watch = config_reload_flag.clone();
-    let last_reparse_watch = last_reparse.clone();
     thread::spawn(move || {
-        if let Err(e) = ipc::watch_config_file(layout_map_watch, &keyd_config_path_watch, config_reload_flag_watch, last_reparse_watch) {
+        if let Err(e) = ipc::watch_config_file(
+            shared.layout_map.clone(),
+            shared.config_path.clone(),
+            shared.config_reload_flag.clone(),
+            shared.last_reparse.clone(),
+        ) {
             eprintln!("Config watcher error: {}", e);
         }
     });

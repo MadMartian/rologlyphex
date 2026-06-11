@@ -2,7 +2,7 @@ use std::io::Write;
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 
-use crate::socket::client_socket_path;
+use crate::socket::{client_socket_path, Command};
 
 fn send_message(msg: &str) {
     let path = match client_socket_path() {
@@ -31,9 +31,11 @@ fn send_message(msg: &str) {
 }
 
 pub fn send_type(character: &str) {
-    send_message(&format!("type {}\n", character));
+    if let Some(ch) = character.chars().next() {
+        send_message(&Command::Type(ch).encode());
+    }
 }
 
 pub fn send_show() {
-    send_message("show\n");
+    send_message(&Command::Show.encode());
 }

@@ -88,7 +88,7 @@ impl XTyper {
         }
     }
 
-    pub fn type_char(&mut self, ch: char) {
+    pub fn type_char(&mut self, ch: char) -> Result<(), String> {
         let keysym = unicode_to_keysym(ch);
 
         if let Some(&keycode) = self.cache.get(&keysym) {
@@ -98,16 +98,16 @@ impl XTyper {
                 self.lru_order.push_back(keysym);
             }
             self.send_key(keycode as u32);
-            return;
+            return Ok(());
         }
 
         let keycode = unsafe { xlib::XKeysymToKeycode(self.display, keysym) };
         if keycode != 0 {
             self.send_key(keycode as u32);
-            return;
+            return Ok(());
         }
 
-        self.remap_and_type(keysym);
+        self.remap_and_type(keysym)
     }
 
     fn send_key(&self, keycode: u32) {
@@ -118,47 +118,38 @@ impl XTyper {
         }
     }
 
-    fn remap_and_type(&mut self, keysym: xlib::KeySym) {
+    fn remap_and_type(&mut self, keysym: xlib::KeySym) -> Result<(), String> {
         let t0 = std::time::Instant::now();
 
         // Prefer a free keycode; if the pool is exhausted, evict the LRU cached entry.
         let (free_kc, consumed_free_slot) = if let Some(&kc) = self.free_keycodes.last() {
             (kc, true)
         } else {
-            let evicted_sym = match self.lru_order.pop_front() {
-                Some(s) => s,
-                None => {
-                    eprintln!("Error: no keycodes available for keysym 0x{:x}", keysym);
-                    return;
-                }
-            };
-            let kc = match self.cache.remove(&evicted_sym) {
-                Some(k) => k,
-                None => {
-                    eprintln!("Error: LRU eviction cache miss for 0x{:x}", evicted_sym);
-                    return;
-                }
-            };
+            let evicted_sym = self.lru_order.pop_front()
+                .ok_or_else(|| format!("no keycodes available for keysym 0x{:x}", keysym))?;
+            let kc = self.cache.remove(&evicted_sym)
+                .ok_or_else(|| format!("LRU eviction cache miss for 0x{:x}", evicted_sym))?;
             debug_log!("[🐛DEBUG] Evicting LRU keysym 0x{:x} from keycode {} for 0x{:x}",
                 evicted_sym, kc, keysym);
             (kc, false)
         };
 
-        unsafe {
-            let mut keysyms_per_kc: i32 = 0;
-            let mapping = xlib::XGetKeyboardMapping(self.display, free_kc, 1, &mut keysyms_per_kc);
+        let keysyms_per_kc = unsafe {
+            let mut n: i32 = 0;
+            let mapping = xlib::XGetKeyboardMapping(self.display, free_kc, 1, &mut n);
             if !mapping.is_null() {
                 xlib::XFree(mapping as *mut _);
             }
+            n
+        };
 
-            if keysyms_per_kc <= 0 {
-                eprintln!("Error: invalid keyboard mapping width: {}", keysyms_per_kc);
-                return;
-            }
+        if keysyms_per_kc <= 0 {
+            return Err(format!("invalid keyboard mapping width: {}", keysyms_per_kc));
+        }
 
+        unsafe {
             let mut new_syms = vec![xlib::NoSymbol as xlib::KeySym; keysyms_per_kc as usize];
             new_syms[0] = keysym;
-
             xlib::XChangeKeyboardMapping(
                 self.display,
                 free_kc as i32,
@@ -183,6 +174,7 @@ impl XTyper {
 
         debug_log!("[🐛DEBUG] Remapped keysym 0x{:x} -> keycode {} ({:?}), {} free + {} cached",
             keysym, free_kc, t0.elapsed(), self.free_keycodes.len(), self.cache.len());
+        Ok(())
     }
 }
 

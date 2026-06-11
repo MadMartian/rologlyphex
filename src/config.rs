@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
 
-use crate::debug_log;
-
 #[derive(Debug, Clone)]
 pub struct ButtonLegend {
     pub key: String,
@@ -165,11 +163,7 @@ impl ConfigParser {
                 };
 
                 if let Some(label) = label_override {
-                    let mut chars = label.chars();
-                    let display = chars.next().unwrap_or(' ').to_string();
-                    if chars.next().is_some() {
-                        debug_log!("[🐛DEBUG] Button label '{}' has extra characters, using first char '{}'", label, display);
-                    }
+                    let display = crate::first_char_of(&label, "button label").unwrap_or(' ').to_string();
                     buttons.push(ButtonLegend { key, display });
                 } else if let Some(display) = Self::extract_display_char(&action) {
                     buttons.push(ButtonLegend { key, display });
@@ -396,9 +390,9 @@ mod tests {
         assert_eq!(label, "G1-6");
         assert_eq!(keys, vec!["f19", "f20", "f21", "f22", "f23", "f24"]);
 
-        let comment_no_quotes = "# group: SinLoon = f13,f14,f15,f17";
+        let comment_no_quotes = "# group: Buttons = f13,f14,f15,f17";
         let (label, keys) = ConfigParser::parse_group_comment(comment_no_quotes).unwrap();
-        assert_eq!(label, "SinLoon");
+        assert_eq!(label, "Buttons");
         assert_eq!(keys, vec!["f13", "f14", "f15", "f17"]);
     }
 
@@ -492,7 +486,7 @@ f2 = macro(B)
     fn test_button_label_override_single_char() {
         let config = "\
 [ids]
-1189:8890
+1111:2222
 
 [test:layout]
 # label: ➡
@@ -516,7 +510,7 @@ f14 = macro(⇒)
     fn test_button_label_override_truncates_extra_chars() {
         let config = "\
 [ids]
-1189:8890
+1111:2222
 
 [test:layout]
 # label: Right Arrow
@@ -539,7 +533,7 @@ f13 = macro(→)
     fn test_button_label_non_adjacent_ignored() {
         let config = "\
 [ids]
-1189:8890
+1111:2222
 
 [test:layout]
 # label: Should Be Ignored
