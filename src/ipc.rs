@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use notify::{Watcher, RecursiveMode, recommended_watcher};
 use crate::config::{ConfigParser, LayoutInfo};
 use crate::debug_log;
@@ -35,9 +35,10 @@ pub fn listen_to_keyd(
     config_path: Arc<String>,
     reload_flag: Arc<AtomicBool>,
     config_reload_flag: Arc<AtomicBool>,
+    last_reparse: Arc<Mutex<Instant>>,
 ) -> Result<(), String> {
     loop {
-        match connect_and_listen(&layout_map, &current_layout, &config_path, &reload_flag, &config_reload_flag) {
+        match connect_and_listen(&layout_map, &current_layout, &config_path, &reload_flag, &config_reload_flag, &last_reparse) {
             Ok(()) => {
                 thread::sleep(Duration::from_millis(500));
             }
@@ -55,6 +56,7 @@ fn connect_and_listen(
     config_path: &str,
     reload_flag: &Arc<AtomicBool>,
     config_reload_flag: &Arc<AtomicBool>,
+    last_reparse: &Arc<Mutex<Instant>>,
 ) -> Result<(), String> {
     let mut stream = UnixStream::connect(KEYD_SOCKET_PATH)
         .map_err(|e| format!("Failed to connect to keyd socket: {}", e))?;
@@ -103,7 +105,7 @@ fn connect_and_listen(
 
                     if !line.is_empty() {
                         debug_log!("[🐛DEBUG] IPC line: {:?}", line);
-                        handle_layout_event(&line, layout_map, current_layout, config_path, reload_flag, config_reload_flag);
+                        handle_layout_event(&line, layout_map, current_layout, config_path, reload_flag, config_reload_flag, last_reparse);
                     }
                 }
             }
@@ -121,6 +123,7 @@ fn handle_layout_event(
     config_path: &str,
     reload_flag: &Arc<AtomicBool>,
     config_reload_flag: &Arc<AtomicBool>,
+    last_reparse: &Arc<Mutex<Instant>>,
 ) {
     if let Some(layout_name) = line.strip_prefix('/') {
         // Layout change event
@@ -134,7 +137,11 @@ fn handle_layout_event(
         // If it's /main (after reload), schedule config re-parse and XTyper rescan
         if layout_name == "main" {
             debug_log!("[🐛DEBUG] Detected reload signal (/main event)");
-            reparse_config(layout_map, config_path, config_reload_flag.clone());
+            if try_claim_reparse(last_reparse) {
+                reparse_config(layout_map, config_path, config_reload_flag.clone());
+            } else {
+                debug_log!("[🐛DEBUG] IPC /main reparse suppressed by debounce");
+            }
             reload_flag.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
@@ -144,6 +151,7 @@ pub fn watch_config_file(
     layout_map: Arc<RwLock<HashMap<String, LayoutInfo>>>,
     config_path: &str,
     config_reload_flag: Arc<AtomicBool>,
+    last_reparse: Arc<Mutex<Instant>>,
 ) -> Result<(), String> {
     let (tx, rx) = std::sync::mpsc::channel();
 
@@ -155,18 +163,14 @@ pub fn watch_config_file(
 
     debug_log!("[🐛DEBUG] Watching {} for changes", config_path);
 
-    // Debounce multiple events
-    let mut last_reparse = std::time::Instant::now();
-    let debounce_duration = Duration::from_millis(200);
-
     loop {
         match rx.recv() {
             Ok(_event) => {
-                let now = std::time::Instant::now();
-                if now.duration_since(last_reparse) > debounce_duration {
+                if try_claim_reparse(&last_reparse) {
                     debug_log!("[🐛DEBUG] Config file changed, reparsing...");
                     reparse_config(&layout_map, config_path, config_reload_flag.clone());
-                    last_reparse = now;
+                } else {
+                    debug_log!("[🐛DEBUG] inotify reparse suppressed by debounce");
                 }
             }
             Err(e) => {
@@ -177,6 +181,20 @@ pub fn watch_config_file(
     }
 
     Ok(())
+}
+
+/// Returns true and updates the timestamp if enough time has elapsed since the last reparse.
+/// Both the IPC and inotify paths call this to share a single debounce window.
+fn try_claim_reparse(last_reparse: &Arc<Mutex<Instant>>) -> bool {
+    const DEBOUNCE: Duration = Duration::from_millis(200);
+    let now = Instant::now();
+    if let Ok(mut last) = last_reparse.lock() {
+        if now.duration_since(*last) > DEBOUNCE {
+            *last = now;
+            return true;
+        }
+    }
+    false
 }
 
 fn reparse_config(

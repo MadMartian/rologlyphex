@@ -10,6 +10,7 @@ mod xtype;
 use std::sync::{Arc, RwLock, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
+use std::time::Instant;
 use gtk4::prelude::*;
 use gtk4::Application;
 use crate::settings::AppSettings;
@@ -224,6 +225,9 @@ fn run_daemon(settings: Arc<AppSettings>) {
     // Flag to signal on-demand overlay re-display
     let show_requested = Arc::new(AtomicBool::new(false));
 
+    // Shared debounce timestamp for config reparse (inotify + IPC paths share one window)
+    let last_reparse = Arc::new(Mutex::new(Instant::now()));
+
     // GTK Application setup
     let app = Application::builder()
         .application_id("com.extollit.rologlyphex")
@@ -298,8 +302,9 @@ fn run_daemon(settings: Arc<AppSettings>) {
     let keyd_config_path_ipc = keyd_config_path.clone();
     let reload_flag_ipc = reload_flag.clone();
     let config_reload_flag_ipc = config_reload_flag.clone();
+    let last_reparse_ipc = last_reparse.clone();
     thread::spawn(move || {
-        if let Err(e) = ipc::listen_to_keyd(layout_map_ipc, current_layout_ipc, keyd_config_path_ipc, reload_flag_ipc, config_reload_flag_ipc) {
+        if let Err(e) = ipc::listen_to_keyd(layout_map_ipc, current_layout_ipc, keyd_config_path_ipc, reload_flag_ipc, config_reload_flag_ipc, last_reparse_ipc) {
             eprintln!("IPC listener error: {}", e);
         }
     });
@@ -318,8 +323,9 @@ fn run_daemon(settings: Arc<AppSettings>) {
     let layout_map_watch = layout_map.clone();
     let keyd_config_path_watch = keyd_config_path.clone();
     let config_reload_flag_watch = config_reload_flag.clone();
+    let last_reparse_watch = last_reparse.clone();
     thread::spawn(move || {
-        if let Err(e) = ipc::watch_config_file(layout_map_watch, &keyd_config_path_watch, config_reload_flag_watch) {
+        if let Err(e) = ipc::watch_config_file(layout_map_watch, &keyd_config_path_watch, config_reload_flag_watch, last_reparse_watch) {
             eprintln!("Config watcher error: {}", e);
         }
     });

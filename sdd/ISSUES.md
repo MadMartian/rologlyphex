@@ -5,7 +5,6 @@
 | A | Keycode pool depletion across restarts | Low (fixed with LRU eviction) |
 | E | Caps Lock active causes wrong character output (XKB/core mapping mismatch) | Medium |
 | B | 100ms polling latency | Low |
-| C | Double config re-parse on keyd reload | Low |
 | D | Non-BMP characters (emoji) produce wrong output in Java/AWT-based applications | Medium |
 
 ## A. Keycode pool depletion across restarts
@@ -28,18 +27,6 @@ With ~50 free keycodes and ~15 characters per session, exhaustion would require 
 The GTK main thread polls a `Mutex<String>` every 100ms for layout changes (`glib::timeout_add_local`). This introduces up to 100ms latency between a keyd layout change event and the overlay appearing. It also keeps the main loop doing work every 100ms even when idle.
 
 **Mitigation**: Replace polling with an event-driven approach using `glib::MainContext::channel()`, which would deliver layout changes to the GTK thread with zero latency and zero idle overhead.
-
-## C. Double config re-parse on keyd reload
-
-**Severity**: Low (wasteful, not harmful)
-
-When `keyd reload` is run, two things happen nearly simultaneously:
-1. The inotify watcher detects the config file change and triggers `reparse_config()`
-2. keyd sends a `/main` layout event via IPC, which also triggers `reparse_config()`
-
-The inotify watcher has a 200ms debounce, but the IPC `/main` handler has none and typically fires first. The result is two sequential config parses for one reload event.
-
-**Mitigation**: Add a shared debounce mechanism (e.g., a timestamp of last reparse) checked by both the inotify and IPC paths.
 
 ## D. Non-BMP characters (emoji) produce wrong output in Java/AWT-based applications
 
