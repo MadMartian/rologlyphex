@@ -7,7 +7,6 @@
 | B | 100ms polling latency | Low |
 | D | Non-BMP characters (emoji) produce wrong output in Java/AWT-based applications | Medium |
 | F | /main IPC event fires on layer navigation, not only on keyd reload | Low |
-| G | Poisoned last_reparse mutex permanently disables hot-reload | Low (unreachable in practice) |
 | H | Root-context socket discovery is vulnerable to TOCTOU via /run/user/* scan | Medium |
 | I | No XSetErrorHandler — any X protocol error silently exit()s the daemon | Medium |
 
@@ -70,15 +69,7 @@ When Caps Lock is active, characters typed via rologlyphex produce wrong output.
 
 keyd's `IPC_LAYER_LISTEN` protocol sends the active layer name on every layer change, including returning to the main layer via `setlayout(main)`. The daemon treats every `/main` event as a reload signal: it attempts a config reparse (throttled by the 200ms shared debounce) and sets the XTyper `reload_flag` (triggering `XTyper::rescan()` before the next `type_char()` call). On reload, this is correct behavior. On normal navigation back to main, it is wasteful — a disk read and an X-server round trip happen unnecessarily.
 
-**Mitigation**: Distinguish reload events from navigation events — keyd may expose a separate `IPC_RELOAD` event type, or the daemon could track whether a config file modification preceded the `/main` event (e.g., check a flag set by inotify). Until then, the 200ms debounce limits the blast radius.
-
-## G. Poisoned last_reparse mutex permanently disables hot-reload
-
-**Severity**: Low (unreachable in practice)
-
-If the `Arc<Mutex<Instant>>` shared debounce mutex were poisoned (i.e., a thread panicked while holding it), `try_claim_reparse()` would permanently return `false` via the `if let Ok(...)` guard, silently disabling config hot-reload for the rest of the session. In practice this is unreachable — the only operation under the lock is an `Instant::now()` assignment, which cannot panic. The silent failure mode is the concern.
-
-**Mitigation**: Replace `if let Ok(mut last) = last_reparse.lock()` with `.unwrap_or_else(|e| e.into_inner())` to recover from poisoning rather than silently suppressing all future parses.
+**Mitigation**: Distinguish reload events from navigation events — keyd may expose a separate `IPC_RELOAD` event type. Until then, the spurious reparse on navigation-to-main is a disk read plus an X server round trip; it is not user-visible because the GTK poll's `config_reloaded` flag only triggers a show when the layout actually changed.
 
 ## H. Root-context socket discovery is vulnerable to TOCTOU via /run/user/* scan
 

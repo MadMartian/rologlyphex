@@ -10,7 +10,6 @@ mod xtype;
 use std::sync::{Arc, RwLock, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Instant;
 use gtk4::prelude::*;
 use gtk4::Application;
 use crate::settings::AppSettings;
@@ -225,7 +224,6 @@ fn run_daemon(settings: Arc<AppSettings>, keyd_config: String) {
         config_path: Arc::new(keyd_config),
         reload_flag: Arc::new(AtomicBool::new(false)),
         config_reload_flag: Arc::new(AtomicBool::new(false)),
-        last_reparse: Arc::new(Mutex::new(Instant::now())),
     };
 
     // Flag to signal on-demand overlay re-display
@@ -313,18 +311,6 @@ fn run_daemon(settings: Arc<AppSettings>, keyd_config: String) {
     thread::spawn(move || {
         if let Err(e) = server::run_server(reload_flag_server, show_requested_server) {
             eprintln!("Socket server error: {}", e);
-        }
-    });
-
-    // Spawn inotify watcher thread
-    thread::spawn(move || {
-        if let Err(e) = ipc::watch_config_file(
-            shared.layout_map.clone(),
-            shared.config_path.clone(),
-            shared.config_reload_flag.clone(),
-            shared.last_reparse.clone(),
-        ) {
-            eprintln!("Config watcher error: {}", e);
         }
     });
 

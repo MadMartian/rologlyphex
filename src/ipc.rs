@@ -1,12 +1,10 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
-use notify::{Watcher, RecursiveMode, recommended_watcher};
+use std::time::Duration;
 use crate::config::{ConfigParser, LayoutInfo};
 use crate::debug_log;
 
@@ -29,7 +27,7 @@ const _: () = assert!(std::mem::size_of::<IpcMessage>() == 4112);
 /// IPC message type values from keyd's enum
 const IPC_LAYER_LISTEN: i32 = 6; // 0=SUCCESS,1=FAIL,2=BIND,3=INPUT,4=MACRO,5=RELOAD,6=LAYER_LISTEN
 
-/// Shared mutable state passed to both the keyd IPC and inotify threads.
+/// Shared mutable state passed to the keyd IPC thread and GTK poll loop.
 #[derive(Clone)]
 pub struct SharedState {
     pub layout_map: Arc<RwLock<HashMap<String, LayoutInfo>>>,
@@ -37,7 +35,6 @@ pub struct SharedState {
     pub config_path: Arc<String>,
     pub reload_flag: Arc<AtomicBool>,
     pub config_reload_flag: Arc<AtomicBool>,
-    pub last_reparse: Arc<Mutex<Instant>>,
 }
 
 pub fn listen_to_keyd(state: SharedState) -> Result<(), String> {
@@ -128,72 +125,14 @@ fn handle_layout_event(line: &str, state: &SharedState) {
         drop(layout);
 
         if layout_name == "main" {
+            // /main signals that keyd has finished loading its config. Only now is
+            // it correct to re-parse — inotify fires before keyd reads the updated
+            // file and would produce a blank or stale overlay (see ANTI-PATTERNS #20).
             debug_log!("[🐛DEBUG] Detected reload signal (/main event)");
-            debounced_reparse(&state.layout_map, &state.config_path, state.config_reload_flag.clone(), &state.last_reparse, "IPC /main");
+            reparse_config(&state.layout_map, &state.config_path, state.config_reload_flag.clone());
             state.reload_flag.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
-}
-
-pub fn watch_config_file(
-    layout_map: Arc<RwLock<HashMap<String, LayoutInfo>>>,
-    config_path: Arc<String>,
-    config_reload_flag: Arc<AtomicBool>,
-    last_reparse: Arc<Mutex<Instant>>,
-) -> Result<(), String> {
-    let (tx, rx) = std::sync::mpsc::channel();
-
-    let mut watcher = recommended_watcher(tx)
-        .map_err(|e| format!("Failed to create watcher: {}", e))?;
-
-    watcher.watch(Path::new(config_path.as_str()), RecursiveMode::NonRecursive)
-        .map_err(|e| format!("Failed to watch config: {}", e))?;
-
-    debug_log!("[🐛DEBUG] Watching {} for changes", config_path);
-
-    loop {
-        match rx.recv() {
-            Ok(_event) => {
-                debounced_reparse(&layout_map, &config_path, config_reload_flag.clone(), &last_reparse, "inotify");
-            }
-            Err(e) => {
-                eprintln!("Watcher error: {}", e);
-                break;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Attempt a config reparse if the shared 200ms debounce window allows it.
-fn debounced_reparse(
-    layout_map: &Arc<RwLock<HashMap<String, LayoutInfo>>>,
-    config_path: &str,
-    config_reload_flag: Arc<AtomicBool>,
-    last_reparse: &Arc<Mutex<Instant>>,
-    source: &str,
-) {
-    if try_claim_reparse(last_reparse) {
-        debug_log!("[🐛DEBUG] {} triggered config reparse", source);
-        reparse_config(layout_map, config_path, config_reload_flag);
-    } else {
-        debug_log!("[🐛DEBUG] {} reparse suppressed by debounce", source);
-    }
-}
-
-/// Returns true and updates the timestamp if enough time has elapsed since the last reparse.
-/// Both the IPC and inotify paths call this to share a single debounce window.
-fn try_claim_reparse(last_reparse: &Arc<Mutex<Instant>>) -> bool {
-    const DEBOUNCE: Duration = Duration::from_millis(200);
-    let now = Instant::now();
-    // M-3 / ISSUES G: recover from poisoned mutex rather than permanently suppressing reparsing
-    let mut last = last_reparse.lock().unwrap_or_else(|e| e.into_inner());
-    if now.duration_since(*last) > DEBOUNCE {
-        *last = now;
-        return true;
-    }
-    false
 }
 
 fn reparse_config(
@@ -221,27 +160,3 @@ fn reparse_config(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_try_claim_reparse_allows_first_call() {
-        let last = Arc::new(Mutex::new(Instant::now() - Duration::from_secs(1)));
-        assert!(try_claim_reparse(&last));
-    }
-
-    #[test]
-    fn test_try_claim_reparse_suppresses_second_within_debounce() {
-        let last = Arc::new(Mutex::new(Instant::now() - Duration::from_secs(1)));
-        assert!(try_claim_reparse(&last));
-        // Immediate second call is within the 200ms window
-        assert!(!try_claim_reparse(&last));
-    }
-
-    #[test]
-    fn test_try_claim_reparse_allows_after_debounce_expires() {
-        let last = Arc::new(Mutex::new(Instant::now() - Duration::from_millis(201)));
-        assert!(try_claim_reparse(&last));
-    }
-}

@@ -23,6 +23,7 @@ Coding, functional, and behavioural anti-patterns encountered during development
 | 17 | keyd hard-limits `command()` calls to 64 per config file — excess bindings silently dropped |
 | 18 | Full-keyboard virtual device consumes nearly all X11 keycodes, leaving only ~10 free for XTest remapping |
 | 19 | EEPROM chord modifiers (Ctrl+Alt+Shift) bleed through keyd virtual keyboard, corrupting XCompose sequences |
+| 20 | Watching the keyd config file with inotify to detect reloads |
 
 ## 16. GTK4 FlowBox with `halign=Center` ignores allocated width; `set_default_size` ignored on realized windows
 
@@ -296,3 +297,18 @@ The `mapping.yaml` file already showed bare `f13-f18` without chord modifiers, b
 - Modifier chord keys on a keyd-intercepted device bleed through to X11 even when keyd intercepts the trigger key. Do not use Ctrl/Alt/Shift chords as macropad triggers in a combined config that also includes a full keyboard — either suppress the modifiers with `noop` bindings (conflicts with full keyboard use) or eliminate them from the EEPROM entirely.
 - `ch57x-keyboard-tool` key names (`f13`–`f18`) differ from X11 keysym names (`XF86Tools`, `XF86Launch5-9`). Always validate `mapping.yaml` with `ch57x-keyboard-tool validate` before treating it as flash-ready.
 - When diagnosing XCompose failures, compare `keyd monitor` output (what keyd emits) with `xev` output (what X11 receives). Any keys visible in `xev` but absent from `keyd monitor` originate outside keyd — in this case, the EEPROM chord modifiers.
+
+## 20. Watching the keyd config file with inotify to detect reloads
+
+**Symptom**: After `keyd reload`, the overlay immediately displayed a blank or stale window before any key was pressed.
+
+**What was tried**:
+- `inotify` (via the `notify` crate) to watch the keyd config file for writes, triggering an immediate reparse and setting `config_reload_flag` to show the overlay
+
+**Root cause**: inotify fires the moment the config file's write syscall completes — before keyd has read the updated file and applied the new config. The reparse at that instant may read a partially-written file or may read the correct file but then display the overlay before keyd is ready, so the first button press after a reload types the wrong character until keyd catches up. More critically, `config_reload_flag = true` triggers the GTK poll to call `show_layout()` immediately, before the layout map has been repopulated with the new content. If the parse returns an empty or partial map, the overlay shows blank.
+
+The inotify path adds nothing correct here. When the user edits the keyd config and runs `keyd reload`, the authoritative signal that keyd has finished reloading is the `/main` IPC event — keyd sends this to all `IPC_LAYER_LISTEN` clients after it has successfully parsed and applied the new configuration.
+
+**Resolution**: Removed the inotify watcher entirely. Config reparse is now triggered exclusively from `handle_layout_event` when it receives a `/main` IPC event. The `notify` crate dependency, `watch_config_file`, `debounced_reparse`, `try_claim_reparse`, and the shared `Arc<Mutex<Instant>>` debounce state were all removed.
+
+**Lesson**: For daemons that wrap a reloadable service (keyd, nginx, systemd, etc.), do not use filesystem events to detect when a reload is complete. The file write and the service reload are two separate events; the file write always comes first, sometimes by hundreds of milliseconds. Use the service's own notification mechanism (IPC socket event, D-Bus signal, PID file update, or a purpose-built readiness protocol) to know when the reload is actually done.

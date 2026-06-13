@@ -8,7 +8,7 @@
 | 4 | Overlay window | 4.1 – 4.14 |
 | 5 | Unicode input synthesis | 5.1 – 5.7  |
 | 6 | Socket IPC | 6.1 – 6.7  |
-| 7 | Config hot reload | 7.1 – 7.8  |
+| 7 | Config hot reload | 7.1 – 7.6  |
 | 8 | App configuration | 8.1 – 8.4  |
 | 9 | Miscellaneous | 9.1        |
 
@@ -336,39 +336,29 @@
 - **When** `keyd reload` is run
 - **Then** the daemon reflects the updated configuration — new characters type correctly and the overlay shows updated content — without restarting
 
-### 7.2 Config re-parse is debounced
-- **Given** the keyd config file is written multiple times within 200ms
-- **When** the inotify watcher fires
-- **Then** the config is re-parsed only once
-
-### 7.3 Adding a new layout is picked up
+### 7.2 Adding a new layout is picked up
 - **Given** a new `[name:layout]` section is added to the keyd config
 - **When** the config is re-parsed
 - **Then** the new layout appears in the overlay when navigated to
 
-### 7.4 Updating the group configuration
+### 7.3 Updating the group configuration
 - **Given** the keyd config file's group information was changed
 - **When** the config is reparsed
 - **Then** the overlay updates to reflect the new group configuration
 
-### 7.5 Loading group configuration
+### 7.4 Loading group configuration
 - **Given** the keyd config file's contains group information
 - **When** the config is parsed or reparsed
 - **Then** the group configuration is parsed and loaded from the `[ids]` section
 
-### 7.6 Anonymous group organization
+### 7.5 Anonymous group organization
 - **Given** the `keyd` configuration is parsed
 - **When** some keys do not belong to any groups 
 - **Then** the groupless keys appear in a separate group without a label
 
-### 7.7 Rendering anonymous groups
+### 7.6 Rendering anonymous groups
 - **When** groupless keys are rendered in the overlay
 - **Then** the groupless group is rendered first on-top, preceding named groups
-
-### 7.8 Single re-parse per keyd reload
-- **Given** `keyd reload` is run
-- **When** both the IPC `/main` event and the inotify watcher fire within 200ms of each other
-- **Then** the config is re-parsed exactly once (the second trigger is suppressed by the shared debounce)
 
 ## 8. App configuration
 
