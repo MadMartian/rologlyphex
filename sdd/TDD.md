@@ -5,7 +5,7 @@
 | 1 | CLI dispatch | 1.1 – 1.11 |
 | 2 | Config parsing | 2.1 – 2.15 |
 | 3 | keyd IPC | 3.1 – 3.5  |
-| 4 | Overlay window | 4.1 – 4.14 |
+| 4 | Overlay window | 4.1 – 4.18 |
 | 5 | Unicode input synthesis | 5.1 – 5.7  |
 | 6 | Socket IPC | 6.1 – 6.7  |
 | 7 | Config hot reload | 7.1 – 7.6  |
@@ -200,8 +200,8 @@
 - **When** the user clicks on the overlay's screen area
 - **Then** the click passes through to the window underneath
 
-### 4.6 Overlay positioned at top-right of rightmost monitor
-- **Given** multiple monitors are connected
+### 4.6 Overlay positioned at top-right of rightmost monitor by default
+- **Given** multiple monitors are connected and no `monitor`/`corner` is configured
 - **When** the overlay appears
 - **Then** it is anchored to the top-right corner of the monitor with the greatest x + width
 
@@ -244,6 +244,26 @@
 - **Given** the daemon is not running and the overlay is hidden
 - **When** the user requests to show the overlay window
 - **Then** the overlay is not shown and an error message is returned with a non-zero status
+
+### 4.15 Configured corner anchors the overlay
+- **Given** `corner` is set to `bottom-left`
+- **When** the overlay appears on the target monitor
+- **Then** it is anchored to the bottom-left corner, inset by the window margin, with its bottom edge offset by the measured window height
+
+### 4.16 Configured monitor selects the display
+- **Given** `monitor` matches a connected monitor's connector name (e.g. `DP-1`)
+- **When** the overlay appears
+- **Then** it is positioned on that monitor rather than the rightmost one
+
+### 4.17 Unknown monitor falls back to rightmost
+- **Given** `monitor` matches no connected monitor's connector, model, or index
+- **When** the overlay appears
+- **Then** a warning is printed and the overlay falls back to the rightmost monitor
+
+### 4.18 Unrecognized corner falls back to top-right
+- **Given** `corner` is set to a value that is not one of the four corners
+- **When** the daemon resolves the corner preference
+- **Then** a warning is printed and the corner defaults to top-right
 
 ## 5. Unicode input synthesis
 

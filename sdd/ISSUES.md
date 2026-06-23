@@ -67,7 +67,7 @@ When Caps Lock is active, characters typed via rologlyphex produce wrong output.
 
 **Severity**: Low (wasteful, not harmful)
 
-keyd's `IPC_LAYER_LISTEN` protocol sends the active layer name on every layer change, including returning to the main layer via `setlayout(main)`. The daemon treats every `/main` event as a reload signal: it attempts a config reparse (throttled by the 200ms shared debounce) and sets the XTyper `reload_flag` (triggering `XTyper::rescan()` before the next `type_char()` call). On reload, this is correct behavior. On normal navigation back to main, it is wasteful — a disk read and an X-server round trip happen unnecessarily.
+keyd's `IPC_LAYER_LISTEN` protocol sends the active layer name on every layer change, including returning to the main layer via `setlayout(main)`. The daemon treats every `/main` event as a reload signal: it re-parses the config and sets the XTyper `reload_flag` (triggering `XTyper::rescan()` before the next `type_char()` call). On reload, this is correct behavior. On normal navigation back to main, it is wasteful — a disk read and an X-server round trip happen unnecessarily.
 
 **Mitigation**: Distinguish reload events from navigation events — keyd may expose a separate `IPC_RELOAD` event type. Until then, the spurious reparse on navigation-to-main is a disk read plus an X server round trip; it is not user-visible because the GTK poll's `config_reloaded` flag only triggers a show when the layout actually changed.
 

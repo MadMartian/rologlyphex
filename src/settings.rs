@@ -8,6 +8,11 @@ pub struct AppSettings {
     pub timeout: Option<u64>,
     pub size: Option<String>,
     pub verbose: Option<bool>,
+    /// Monitor to display the overlay on. Matched against connector name (e.g. "DP-1"),
+    /// then model name, then numeric index. Falls back to the rightmost monitor.
+    pub monitor: Option<String>,
+    /// Corner to align the overlay to: top-left, top-right, bottom-left, bottom-right.
+    pub corner: Option<String>,
 }
 
 impl AppSettings {
@@ -46,12 +51,15 @@ impl AppSettings {
         path
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn merge_cli(
         &mut self,
         keyd_config: Option<String>,
         timeout: Option<u64>,
         size: Option<String>,
         verbose: Option<bool>,
+        monitor: Option<String>,
+        corner: Option<String>,
     ) {
         if keyd_config.is_some() {
             self.keyd_config = keyd_config;
@@ -64,6 +72,12 @@ impl AppSettings {
         }
         if verbose.is_some() {
             self.verbose = verbose;
+        }
+        if monitor.is_some() {
+            self.monitor = monitor;
+        }
+        if corner.is_some() {
+            self.corner = corner;
         }
     }
 

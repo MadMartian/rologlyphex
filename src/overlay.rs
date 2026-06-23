@@ -3,24 +3,59 @@ use crate::debug_log;
 use glib::timeout_add_local_once;
 use gtk4::prelude::*;
 use gtk4::{Align, Application, ApplicationWindow, Box, CssProvider, FlowBox, Label, Orientation};
-use std::cell::Cell;
 use std::collections::HashMap;
-use std::rc::Rc;
 use std::sync::{Arc, RwLock};
 
 const WINDOW_MARGIN: i32 = 20;
 
+#[derive(Clone, Copy)]
 struct MonitorGeometry {
     x: i32,
     y: i32,
     width: i32,
-    #[allow(dead_code)]
     height: i32,
 }
 
 impl MonitorGeometry {
     fn fallback() -> Self {
         MonitorGeometry { x: 0, y: 0, width: 1920, height: 1080 }
+    }
+}
+
+/// Which corner of the target monitor the overlay aligns to.
+#[derive(Clone, Copy)]
+enum Corner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl Corner {
+    /// Parse a config/CLI value. Accepts "top-left", "top_right", "TR", etc.
+    /// Returns None for unrecognized values so the caller can warn and default.
+    fn parse(s: &str) -> Option<Corner> {
+        match s.trim().to_lowercase().replace('_', "-").as_str() {
+            "top-left" | "tl" => Some(Corner::TopLeft),
+            "top-right" | "tr" => Some(Corner::TopRight),
+            "bottom-left" | "bl" => Some(Corner::BottomLeft),
+            "bottom-right" | "br" => Some(Corner::BottomRight),
+            _ => None,
+        }
+    }
+
+    /// Top-left pixel for a `win_w`×`win_h` overlay on `mon`, inset by WINDOW_MARGIN.
+    fn position(&self, mon: &MonitorGeometry, win_w: i32, win_h: i32) -> (i32, i32) {
+        let left = mon.x + WINDOW_MARGIN;
+        let right = mon.x + mon.width - win_w - WINDOW_MARGIN;
+        let top = mon.y + WINDOW_MARGIN;
+        let bottom = mon.y + mon.height - win_h - WINDOW_MARGIN;
+        match self {
+            Corner::TopLeft => (left, top),
+            Corner::TopRight => (right, top),
+            Corner::BottomLeft => (left, bottom),
+            Corner::BottomRight => (right, bottom),
+        }
     }
 }
 
@@ -33,12 +68,21 @@ pub struct OverlayWindow {
     dismiss_generation: Arc<AtomicU64>,
     dismiss_timeout_ms: u64,
     window_width: i32,
-    target_x: Rc<Cell<i32>>,
-    target_y: Rc<Cell<i32>>,
+    /// User preference for which monitor to display on (connector/model/index), if any.
+    monitor_pref: Option<String>,
+    /// Corner of the target monitor the overlay aligns to.
+    corner: Corner,
 }
 
 impl OverlayWindow {
-    pub fn new(app: &Application, layout_map: Arc<RwLock<HashMap<String, LayoutInfo>>>, dismiss_timeout_ms: u64, window_width: i32) -> Self {
+    pub fn new(
+        app: &Application,
+        layout_map: Arc<RwLock<HashMap<String, LayoutInfo>>>,
+        dismiss_timeout_ms: u64,
+        window_width: i32,
+        monitor_pref: Option<String>,
+        corner_pref: Option<String>,
+    ) -> Self {
         // Verify display is available and running on X11 backend
         let display = gdk4::Display::default().unwrap_or_else(|| {
             eprintln!("Error: no display available. Ensure a graphical session is running.");
@@ -62,9 +106,14 @@ impl OverlayWindow {
         window.set_can_focus(false);
         window.set_can_target(false);
 
-        let mon = Self::find_rightmost_monitor();
-        let target_x = Rc::new(Cell::new(mon.x + mon.width - window_width - WINDOW_MARGIN));
-        let target_y = Rc::new(Cell::new(mon.y + WINDOW_MARGIN));
+        // Resolve the corner preference once; default to top-right (legacy behaviour).
+        let corner = corner_pref.as_deref().and_then(Corner::parse).unwrap_or_else(|| {
+            if let Some(c) = &corner_pref {
+                eprintln!("Warning: unrecognized corner '{}', using top-right. \
+                    Valid values: top-left, top-right, bottom-left, bottom-right", c);
+            }
+            Corner::TopRight
+        });
 
         // Content
         let content_box = Box::new(Orientation::Vertical, 12);
@@ -90,8 +139,12 @@ impl OverlayWindow {
         Self::apply_css();
         window.set_visible(false);
 
-        let tx = target_x.get();
-        let ty = target_y.get();
+        // Initial position with a zero-height estimate; the window is invisible until the
+        // first show_layout, which recomputes the position from the measured height. The
+        // target monitor and corner are re-resolved on every show, so monitor hotplug needs
+        // no separate subscription.
+        let mon = Self::select_monitor(&monitor_pref);
+        let (tx, ty) = corner.position(&mon, window_width, 0);
         WidgetExt::realize(&window); // Force realization to set X11 properties before first map
 
         if let Some(surface) = window.surface() {
@@ -103,48 +156,37 @@ impl OverlayWindow {
 
         let dismiss_generation = Arc::new(AtomicU64::new(0));
 
-        // Subscribe to monitor changes for hotplug support
-        let tx_hotplug = target_x.clone();
-        let ty_hotplug = target_y.clone();
-        let ww = window_width;
-        let monitors = display.monitors();
-        monitors.connect_items_changed(move |_, _, _, _| {
-            let mon = Self::find_rightmost_monitor();
-            let new_x = mon.x + mon.width - ww - WINDOW_MARGIN;
-            let new_y = mon.y + WINDOW_MARGIN;
-            tx_hotplug.set(new_x);
-            ty_hotplug.set(new_y);
-            debug_log!("[🐛DEBUG] Monitor change detected, new overlay position: ({}, {})", new_x, new_y);
-        });
-
         OverlayWindow {
             window,
             layout_map,
             dismiss_generation,
             dismiss_timeout_ms,
             window_width,
-            target_x,
-            target_y,
+            monitor_pref,
+            corner,
         }
     }
 
     pub fn show_layout(&self, layout_name: &str) {
+        let mut window_height = 0;
         if let Some(child) = self.window.child() {
             if let Ok(content_box) = child.downcast::<Box>() {
                 self.update_layout_content(&content_box, layout_name);
                 let (_, natural_h, _, _) = content_box.measure(Orientation::Vertical, self.window_width);
                 if natural_h > 0 {
                     self.window.set_size_request(self.window_width, natural_h);
+                    window_height = natural_h;
                 }
             }
         }
 
         self.window.set_visible(true);
 
-        // Re-apply position and properties every show
+        // Re-resolve monitor and corner on every show so the overlay follows monitor
+        // hotplug and uses the current measured height for bottom-aligned corners.
+        let mon = Self::select_monitor(&self.monitor_pref);
+        let (tx, ty) = self.corner.position(&mon, self.window_width, window_height);
         let win = self.window.clone();
-        let tx = self.target_x.get();
-        let ty = self.target_y.get();
         Self::configure_x11_properties(&win, tx, ty);
 
         self.reset_dismiss_timer();
@@ -359,7 +401,16 @@ impl OverlayWindow {
         );
     }
 
-    fn find_rightmost_monitor() -> MonitorGeometry {
+    fn geometry_of(monitor: &gdk4::Monitor) -> MonitorGeometry {
+        let g = monitor.geometry();
+        MonitorGeometry { x: g.x(), y: g.y(), width: g.width(), height: g.height() }
+    }
+
+    /// Select the target monitor. When `pref` is set, it is matched (case-insensitive,
+    /// in precedence order) against the connector name (e.g. "DP-1"), then the model
+    /// name, then a numeric index into the monitor list. When `pref` is absent or no
+    /// match is found, falls back to the rightmost monitor — the legacy default.
+    fn select_monitor(pref: &Option<String>) -> MonitorGeometry {
         let display = match gdk4::Display::default() {
             Some(d) => d,
             None => {
@@ -368,24 +419,48 @@ impl OverlayWindow {
             }
         };
         let monitors = display.monitors();
+        let n = monitors.n_items();
+        let monitor_at = |i: u32| monitors.item(i).and_then(|o| o.downcast::<gdk4::Monitor>().ok());
 
+        if let Some(want) = pref.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            // 1. connector name
+            for i in 0..n {
+                if let Some(m) = monitor_at(i) {
+                    if m.connector().is_some_and(|c| c.eq_ignore_ascii_case(want)) {
+                        debug_log!("[🐛DEBUG] Selected monitor by connector '{}'", want);
+                        return Self::geometry_of(&m);
+                    }
+                }
+            }
+            // 2. model name
+            for i in 0..n {
+                if let Some(m) = monitor_at(i) {
+                    if m.model().is_some_and(|c| c.eq_ignore_ascii_case(want)) {
+                        debug_log!("[🐛DEBUG] Selected monitor by model '{}'", want);
+                        return Self::geometry_of(&m);
+                    }
+                }
+            }
+            // 3. numeric index into the monitor list
+            if let Ok(idx) = want.parse::<u32>() {
+                if let Some(m) = monitor_at(idx) {
+                    debug_log!("[🐛DEBUG] Selected monitor by index {}", idx);
+                    return Self::geometry_of(&m);
+                }
+            }
+            eprintln!("Warning: monitor '{}' not found; falling back to rightmost monitor", want);
+        }
+
+        // Rightmost monitor: largest x + width.
         let mut best: Option<MonitorGeometry> = None;
         let mut max_x = i32::MIN;
-
-        for i in 0..monitors.n_items() {
-            if let Some(obj) = monitors.item(i) {
-                if let Ok(monitor) = obj.downcast::<gdk4::Monitor>() {
-                    let geom = monitor.geometry();
-                    let x_end = geom.x() + geom.width();
-                    if x_end > max_x {
-                        max_x = x_end;
-                        best = Some(MonitorGeometry {
-                            x: geom.x(),
-                            y: geom.y(),
-                            width: geom.width(),
-                            height: geom.height(),
-                        });
-                    }
+        for i in 0..n {
+            if let Some(m) = monitor_at(i) {
+                let geom = Self::geometry_of(&m);
+                let x_end = geom.x + geom.width;
+                if x_end > max_x {
+                    max_x = x_end;
+                    best = Some(geom);
                 }
             }
         }
@@ -487,4 +562,35 @@ fn send_wm_add(
 extern "C" {
     fn gdk_x11_surface_get_xid(surface: *mut std::ffi::c_void) -> x11::xlib::Window;
     fn gdk_x11_display_get_xdisplay(display: *mut std::ffi::c_void) -> *mut x11::xlib::Display;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn corner_parse_accepts_variants() {
+        assert!(matches!(Corner::parse("top-left"), Some(Corner::TopLeft)));
+        assert!(matches!(Corner::parse("TOP_RIGHT"), Some(Corner::TopRight)));
+        assert!(matches!(Corner::parse("  bottom-left "), Some(Corner::BottomLeft)));
+        assert!(matches!(Corner::parse("br"), Some(Corner::BottomRight)));
+        assert!(Corner::parse("middle").is_none());
+        assert!(Corner::parse("").is_none());
+    }
+
+    #[test]
+    fn corner_position_insets_each_corner_by_margin() {
+        // Monitor offset to (100, 50) to confirm the monitor origin is honored.
+        let mon = MonitorGeometry { x: 100, y: 50, width: 1000, height: 800 };
+        let (w, h) = (600, 400);
+        let m = WINDOW_MARGIN;
+
+        assert_eq!(Corner::TopLeft.position(&mon, w, h), (100 + m, 50 + m));
+        assert_eq!(Corner::TopRight.position(&mon, w, h), (100 + 1000 - w - m, 50 + m));
+        assert_eq!(Corner::BottomLeft.position(&mon, w, h), (100 + m, 50 + 800 - h - m));
+        assert_eq!(
+            Corner::BottomRight.position(&mon, w, h),
+            (100 + 1000 - w - m, 50 + 800 - h - m)
+        );
+    }
 }

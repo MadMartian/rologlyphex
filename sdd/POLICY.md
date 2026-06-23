@@ -53,7 +53,7 @@ All data crossing system boundaries must be validated:
 - Do not add crates for functionality achievable with existing dependencies or stdlib
 - The `x11` crate provides Xlib and XTest bindings -- do not add separate X11 binding crates
 - GTK4 bindings (`gtk4`, `gdk4`, `glib`, `cairo-rs`) are the UI framework -- do not introduce alternative UI toolkits
-- The `notify` crate handles inotify -- do not add alternative file-watching crates
+- Config reload is driven by keyd's `/main` IPC event, not by filesystem watching -- do not add file-watching crates (inotify is an anti-pattern here; see ANTI-PATTERNS #20)
 
 ## Architecture rules
 

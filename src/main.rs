@@ -53,6 +53,10 @@ fn print_help() {
     println!("  -c, --config <path>   Path to keyd config file");
     println!("  -t, --timeout <ms>    Overlay dismiss timeout in milliseconds (default: 3000)");
     println!("  -s, --size <W>        Overlay window width (height calculated, default: 600)");
+    println!("  -m, --monitor <id>    Monitor to show the overlay on (connector name, model, or");
+    println!("                        index; default: rightmost monitor)");
+    println!("      --corner <pos>    Corner to align to: top-left, top-right, bottom-left,");
+    println!("                        bottom-right (default: top-right)");
     println!("  -v, --verbose         Enable debug logging");
     println!("  -h, --help            Show this help");
 }
@@ -98,6 +102,8 @@ fn parse_args() -> Mode {
     let mut cli_timeout_ms: Option<u64> = None;
     let mut cli_size: Option<String> = None;
     let mut cli_verbose: Option<bool> = None;
+    let mut cli_monitor: Option<String> = None;
+    let mut cli_corner: Option<String> = None;
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -126,6 +132,18 @@ fn parse_args() -> Mode {
                     std::process::exit(1);
                 }).clone());
             }
+            "--monitor" | "-m" => {
+                cli_monitor = Some(iter.next().unwrap_or_else(|| {
+                    eprintln!("Error: --monitor requires an identifier (connector name, model, or index)");
+                    std::process::exit(1);
+                }).clone());
+            }
+            "--corner" => {
+                cli_corner = Some(iter.next().unwrap_or_else(|| {
+                    eprintln!("Error: --corner requires a value (top-left, top-right, bottom-left, bottom-right)");
+                    std::process::exit(1);
+                }).clone());
+            }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -138,7 +156,7 @@ fn parse_args() -> Mode {
         }
     }
 
-    settings.merge_cli(cli_config, cli_timeout_ms, cli_size, cli_verbose);
+    settings.merge_cli(cli_config, cli_timeout_ms, cli_size, cli_verbose, cli_monitor, cli_corner);
 
     if settings.verbose.unwrap_or(false) {
         DEBUG_ENABLED.store(true, Ordering::Relaxed);
@@ -236,12 +254,21 @@ fn run_daemon(settings: Arc<AppSettings>, keyd_config: String) {
 
     let shared_gtk = shared.clone();
     let show_requested_gtk = show_requested.clone();
+    let monitor_pref = settings.monitor.clone();
+    let corner = settings.corner.clone();
     app.connect_activate(move |app| {
         // Hold guard keeps the app alive even when all windows are hidden.
         // Captured by the timer closure below so it lives for the app's lifetime.
         let hold = app.hold();
 
-        let window = overlay::OverlayWindow::new(app, shared_gtk.layout_map.clone(), timeout_ms, window_width);
+        let window = overlay::OverlayWindow::new(
+            app,
+            shared_gtk.layout_map.clone(),
+            timeout_ms,
+            window_width,
+            monitor_pref.clone(),
+            corner.clone(),
+        );
 
         // Poll for layout changes and update window
         let current_layout = shared_gtk.current_layout.clone();

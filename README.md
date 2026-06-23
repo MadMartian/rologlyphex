@@ -52,6 +52,8 @@ rologlyphex [-c <path>] [-t <ms>] [-s <W>] [-v]
 | `-c, --config <path>` | (config file or required) | Path to keyd config file |
 | `-t, --timeout <ms>` | 3000 | Overlay auto-dismiss timeout |
 | `-s, --size <W>` | 600 | Overlay window width (height is calculated automatically) |
+| `-m, --monitor <id>` | rightmost monitor | Monitor to display on: connector name (e.g. `DP-1`), model name, or numeric index |
+| `--corner <pos>` | `top-right` | Corner to align to: `top-left`, `top-right`, `bottom-left`, `bottom-right` |
 | `-v, --verbose` | off | Enable debug logging |
 
 All flags can be set in `~/.config/rologlyphex/config.toml` instead:
@@ -60,8 +62,14 @@ All flags can be set in `~/.config/rologlyphex/config.toml` instead:
 keyd_config = "/etc/keyd/macropad.conf"
 timeout = 3000
 size = 600
+monitor = "DP-1"
+corner = "top-right"
 verbose = false
 ```
+
+`monitor` is matched (case-insensitive) against the connector name first, then the model
+name, then a numeric index into the monitor list — connector names (as shown by `xrandr`)
+are the most stable. If no monitor matches, the overlay falls back to the rightmost monitor.
 
 CLI flags always override config file values. A missing config file is not an error.
 
@@ -85,7 +93,7 @@ f14 = command(rologlyphex type 🔥)
 
 ### Overlay
 
-The daemon connects to keyd's IPC socket (`/var/run/keyd.socket`) and listens for layout change events. When the active layout changes, a GTK4 window appears in the top-right corner of the rightmost monitor showing the layout name and button legends. The window uses `_NET_WM_WINDOW_TYPE_NOTIFICATION` and an empty input region so it never steals focus or intercepts clicks.
+The daemon connects to keyd's IPC socket (`/var/run/keyd.socket`) and listens for layout change events. When the active layout changes, a GTK4 window appears showing the layout name and button legends. By default it aligns to the top-right corner of the rightmost monitor; the target monitor and corner are configurable (see `--monitor` and `--corner`). The window uses `_NET_WM_WINDOW_TYPE_NOTIFICATION` and an empty input region so it never steals focus or intercepts clicks.
 
 Long layout names auto-reduce to 2/3 font size if they would overflow the window, with ellipsis truncation as a final fallback.
 
@@ -101,7 +109,7 @@ The daemon parses keyd's config format to extract layout metadata:
 - **Display labels** from `# label: <text>` comments preceding a section header (falls back to snake_case to Title Case conversion)
 - **Button legends** from non-`setlayout()` bindings, with `command(rologlyphex type ...)` and `macro(...)` wrappers stripped
 
-Config is re-parsed automatically on file changes (inotify, debounced 200ms) and on keyd reloads.
+Config is re-parsed automatically when keyd reloads, triggered by keyd's `/main` IPC event (which keyd emits only after it has finished applying the new config).
 
 ## Architecture
 
@@ -115,15 +123,14 @@ src/
   client.rs     Unix socket client for `rologlyphex type` and `rologlyphex show`
   socket.rs     Socket path resolution (D-Bus seat detection, XDG_RUNTIME_DIR, root fallback)
   config.rs     keyd config parser, layout/button legend extraction
-  ipc.rs        keyd IPC subscription, inotify config watcher
+  ipc.rs        keyd IPC subscription, config re-parse on reload
 ```
 
-The daemon runs 4 concurrent activities:
+The daemon runs 3 concurrent activities:
 
 1. **GTK main loop** (main thread) — overlay window, 100ms layout-change polling
-2. **keyd IPC listener** (thread) — subscribes to layout events, reconnects on keyd restart
+2. **keyd IPC listener** (thread) — subscribes to layout events, reconnects on keyd restart, and re-parses the config on keyd's `/main` reload signal
 3. **Socket server** (thread) — accepts `type` and `show` commands; synthesizes keypresses via XTest or signals the GTK thread to re-display the overlay
-4. **inotify watcher** (thread) — monitors keyd config for changes
 
 ## Uninstall
 
