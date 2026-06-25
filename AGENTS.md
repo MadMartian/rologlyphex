@@ -21,4 +21,5 @@ Read all of the above, plus:
 
 ### Additional documents (read when relevant)
 
+- `sdd/SCHEMA.md` — Field-by-field reference for the `config.toml` settings and the `layers.toml` glyph map / navigation ring / key-alias format (read when working on configuration, the layers parser, or anything touching the config files)
 - `sdd/ISSUES.md` — Known unresolved issues (read when investigating bugs or unexpected behavior)

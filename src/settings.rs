@@ -4,7 +4,9 @@ use std::path::PathBuf;
 
 #[derive(Deserialize, Default, Clone)]
 pub struct AppSettings {
-    pub keyd_config: Option<String>,
+    /// Path to the layers glyph-map config (layers.toml). Defaults to
+    /// `~/.config/rologlyphex/layers.toml`.
+    pub layers: Option<String>,
     pub timeout: Option<u64>,
     pub size: Option<String>,
     pub verbose: Option<bool>,
@@ -13,6 +15,13 @@ pub struct AppSettings {
     pub monitor: Option<String>,
     /// Corner to align the overlay to: top-left, top-right, bottom-left, bottom-right.
     pub corner: Option<String>,
+    /// Milliseconds of input quiet after the knob settles on a layer before the typist
+    /// remaps for it (the navigation debounce). Default 160. Only used in "debounce" mode.
+    pub nav_settle_ms: Option<u64>,
+    /// When the typist remaps the keymap for a newly-entered layer: "lazy" (on the first
+    /// keypress, with a "Please Wait" overlay) or "debounce" (after the knob settles, no
+    /// indicator). Default "lazy".
+    pub remap_mode: Option<String>,
 }
 
 impl AppSettings {
@@ -37,32 +46,38 @@ impl AppSettings {
         }
     }
 
-    fn get_config_path() -> PathBuf {
-        let mut path = if let Ok(xdg_config_home) = std::env::var("XDG_CONFIG_HOME") {
+    fn config_dir() -> PathBuf {
+        if let Ok(xdg_config_home) = std::env::var("XDG_CONFIG_HOME") {
             PathBuf::from(xdg_config_home)
         } else if let Ok(home) = std::env::var("HOME") {
             PathBuf::from(home).join(".config")
         } else {
             PathBuf::from(".")
-        };
+        }
+        .join("rologlyphex")
+    }
 
-        path.push("rologlyphex");
-        path.push("config.toml");
-        path
+    fn get_config_path() -> PathBuf {
+        Self::config_dir().join("config.toml")
+    }
+
+    /// Default path to the layers glyph-map config when none is configured.
+    pub fn default_layers_path() -> PathBuf {
+        Self::config_dir().join("layers.toml")
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn merge_cli(
         &mut self,
-        keyd_config: Option<String>,
+        layers: Option<String>,
         timeout: Option<u64>,
         size: Option<String>,
         verbose: Option<bool>,
         monitor: Option<String>,
         corner: Option<String>,
     ) {
-        if keyd_config.is_some() {
-            self.keyd_config = keyd_config;
+        if layers.is_some() {
+            self.layers = layers;
         }
         if timeout.is_some() {
             self.timeout = timeout;

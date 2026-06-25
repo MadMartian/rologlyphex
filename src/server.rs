@@ -13,7 +13,7 @@ use std::sync::Arc;
 /// A single UTF-8 character is at most 4 bytes; 16 bytes is generous.
 const MAX_MESSAGE_SIZE: usize = 16;
 
-pub fn run_server(reload_flag: Arc<AtomicBool>, show_requested: Arc<AtomicBool>) -> Result<(), String> {
+pub fn run_server(show_requested: Arc<AtomicBool>) -> Result<(), String> {
     let path = socket_path();
 
     if path.exists() {
@@ -24,7 +24,7 @@ pub fn run_server(reload_flag: Arc<AtomicBool>, show_requested: Arc<AtomicBool>)
     let listener = UnixListener::bind(&path)
         .map_err(|e| format!("Failed to bind socket {:?}: {}", path, e))?;
 
-    // Make socket accessible only to owner (Root/keyd has CAP_DAC_OVERRIDE)
+    // Make socket accessible only to the owning user.
     if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)) {
         eprintln!("Warning: Failed to set socket permissions to 0o600: {}", e);
     }
@@ -66,10 +66,6 @@ pub fn run_server(reload_flag: Arc<AtomicBool>, show_requested: Arc<AtomicBool>)
                                     if rest.chars().count() > 1 {
                                         eprintln!("Warning: received multiple characters, typing only first '{}'", ch);
                                     }
-                                }
-                                // Rescan must precede type_char to pick up any keyd reload
-                                if reload_flag.swap(false, Ordering::Relaxed) {
-                                    typer.rescan();
                                 }
                                 debug_log!("[🐛DEBUG] Typing: {:?}", ch);
                                 if let Err(e) = typer.type_char(ch) {

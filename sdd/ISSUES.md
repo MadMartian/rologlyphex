@@ -6,9 +6,7 @@
 | E | Caps Lock active causes wrong character output (XKB/core mapping mismatch) | Medium |
 | B | 100ms polling latency | Low |
 | D | Non-BMP characters (emoji) produce wrong output in Java/AWT-based applications | Medium |
-| F | /main IPC event fires on layer navigation, not only on keyd reload | Low |
 | H | Root-context socket discovery is vulnerable to TOCTOU via /run/user/* scan | Medium |
-| I | No XSetErrorHandler — any X protocol error silently exit()s the daemon | Medium |
 
 ## A. Keycode pool depletion across restarts
 
@@ -27,7 +25,7 @@ With ~50 free keycodes and ~15 characters per session, exhaustion would require 
 
 **Severity**: Low (perceptible)
 
-The GTK main thread polls a `Mutex<String>` every 100ms for layout changes (`glib::timeout_add_local`). This introduces up to 100ms latency between a keyd layout change event and the overlay appearing. It also keeps the main loop doing work every 100ms even when idle.
+The GTK main thread polls a `Mutex<String>` every 100ms for layout changes (`glib::timeout_add_local`). This introduces up to 100ms latency between the grab thread publishing a layer change (`Mutex<String>`) and the overlay appearing. It also keeps the main loop doing work every 100ms even when idle.
 
 **Mitigation**: Replace polling with an event-driven approach using `glib::MainContext::channel()`, which would deliver layout changes to the GTK thread with zero latency and zero idle overhead.
 
@@ -63,27 +61,10 @@ When Caps Lock is active, characters typed via rologlyphex produce wrong output.
 
 **Mitigation**: Turn off Caps Lock before using macropad character layouts.
 
-## F. /main IPC event fires on layer navigation, not only on keyd reload
-
-**Severity**: Low (wasteful, not harmful)
-
-keyd's `IPC_LAYER_LISTEN` protocol sends the active layer name on every layer change, including returning to the main layer via `setlayout(main)`. The daemon treats every `/main` event as a reload signal: it re-parses the config and sets the XTyper `reload_flag` (triggering `XTyper::rescan()` before the next `type_char()` call). On reload, this is correct behavior. On normal navigation back to main, it is wasteful — a disk read and an X-server round trip happen unnecessarily.
-
-**Mitigation**: Distinguish reload events from navigation events — keyd may expose a separate `IPC_RELOAD` event type. Until then, the spurious reparse on navigation-to-main is a disk read plus an X server round trip; it is not user-visible because the GTK poll's `config_reloaded` flag only triggers a show when the layout actually changed.
-
 ## H. Root-context socket discovery is vulnerable to TOCTOU via /run/user/* scan
 
 **Severity**: Medium
 
-When `rologlyphex type` is invoked as root (no `XDG_RUNTIME_DIR`), `socket.rs:65-72` scans `/run/user/*/rologlyphex.sock` and connects to the first matching path. The seat0 check (`socket.rs:44`) runs separately, but path discovery uses `exists()` which is a TOCTOU race — a local unprivileged user can plant a socket or symlink at a matching path between the check and the connect. A malicious socket could cause glyph mis-delivery (wrong characters typed) or act as a DoS against root-invoked type commands. Root-to-user privilege boundary is the bounded threat; this does not grant the attacker arbitrary root execution.
+When `rologlyphex type` is invoked as root (no `XDG_RUNTIME_DIR`), `socket.rs:48-56` scans `/run/user/*/rologlyphex.sock` and connects to the first matching path. Path discovery uses `exists()`, which is a TOCTOU race — a local unprivileged user can plant a socket or symlink at a matching path between the check and the connect. A malicious socket could cause glyph mis-delivery (wrong characters typed) or act as a DoS against root-invoked type commands. Root-to-user privilege boundary is the bounded threat; this does not grant the attacker arbitrary root execution.
 
-**Mitigation**: Derive the socket path directly from the validated seat0 UID (obtained via the D-Bus login1 query) rather than scanning the filesystem. Then `lstat` the resolved path and verify `S_ISSOCK` and UID ownership before connecting.
-
-## I. No XSetErrorHandler — X protocol errors silently exit() the daemon
-
-**Severity**: Medium
-
-The daemon makes no call to `XSetErrorHandler` or `XSetIOErrorHandler`. If the X server sends an error response to any Xlib call (e.g., `BadWindow` on a destroyed overlay window, `BadAccess` on a keycode already mapped by another client), Xlib's default error handler calls `exit()`. This bypasses Rust's panic hook, produces no log entry, and leaves the daemon socket in place — subsequent `rologlyphex type` calls will connect but get no response until the stale socket times out.
-
-**Mitigation**: Install a custom `XSetErrorHandler` that logs the error details and returns (non-fatal for recoverable errors), and an `XSetIOErrorHandler` that performs a clean shutdown.
-
+**Mitigation**: `lstat` the resolved path and verify `S_ISSOCK` and UID ownership before connecting. Better still, don't invoke the client as root at all — the daemon is a user-session client, so the normal `$XDG_RUNTIME_DIR` path applies and the scan is never reached. (The earlier D-Bus seat0 lookup was removed with keyd retirement.)

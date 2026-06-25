@@ -3,31 +3,30 @@
 | # | Functional area | Rubrics    |
 |---|----------------|------------|
 | 1 | CLI dispatch | 1.1 – 1.11 |
-| 2 | Config parsing | 2.1 – 2.15 |
-| 3 | keyd IPC | 3.1 – 3.5  |
-| 4 | Overlay window | 4.1 – 4.18 |
-| 5 | Unicode input synthesis | 5.1 – 5.7  |
+| 2 | Layers config | 2.1 – 2.7  |
+| 3 | Key input & layer ring | 3.1 – 3.7  |
+| 4 | Overlay window | 4.1 – 4.21 |
+| 5 | Unicode input synthesis | 5.1 – 5.8  |
 | 6 | Socket IPC | 6.1 – 6.7  |
-| 7 | Config hot reload | 7.1 – 7.6  |
-| 8 | App configuration | 8.1 – 8.4  |
-| 9 | Miscellaneous | 9.1        |
+| 7 | App configuration | 7.1 – 7.4  |
+| 8 | Miscellaneous | 8.1        |
 
 ## 1. CLI dispatch
 
 ### 1.1 Daemon mode is default
-- **Given** the binary is invoked with `--config /path/to/config`
+- **Given** the binary is invoked with no `type`/`show` subcommand
 - **When** it starts
-- **Then** it runs as a daemon (GTK main loop, IPC listener, socket server)
+- **Then** it runs as a daemon (GTK main loop, key-grab thread, socket server)
 
 ### 1.2 Type subcommand enters client mode
 - **Given** the binary is invoked with `type <char>`
 - **When** it starts
 - **Then** it connects to the daemon socket, sends the character, and exits
 
-### 1.3 Missing config flag is an error
-- **Given** the binary is invoked with no arguments and no `type` subcommand
-- **When** it starts
-- **Then** it prints an error and usage message and exits with non-zero status
+### 1.3 Daemon requires a usable layers config
+- **Given** no usable `layers.toml` (missing, or an empty navigation ring)
+- **When** the daemon loads it (from `--config`/`layers` or the default path)
+- **Then** it prints an error and exits with non-zero status
 
 ### 1.4 Missing type argument is an error
 - **Given** the binary is invoked with `type` and no character argument
@@ -69,109 +68,79 @@
 - **When** the GDK backend is detected
 - **Then** it prints an error mentioning `GDK_BACKEND=x11` and exits with non-zero status
 
-## 2. Config parsing
+## 2. Layers config
 
-### 2.1 Layout sections are detected
-- **Given** a keyd config containing `[arrows:layout]`
-- **When** the config is parsed
-- **Then** a layout named "arrows" is present in the result map
+### 2.1 Aliases resolve to logical names
+- **Given** `[keys]` maps `F13 = "SL1"` and a layer binds `SL1 = "←"`
+- **When** the config is loaded
+- **Then** typing for that layer/key yields `←`, keyed by the logical name `SL1` (not the F-key)
 
-### 2.2 Non-layout sections are ignored
-- **Given** a keyd config containing `[ids]` and `[main]` (no `:layout` suffix)
-- **When** the config is parsed
-- **Then** neither appears in the result map
+### 2.2 Physical key references resolve to their alias
+- **Given** `[keys]` maps `F13 = "SL1"` and a layer binding is written `F13 = "←"`
+- **When** the config is loaded
+- **Then** it resolves to the logical name `SL1`; F-keys are never internal identifiers
 
-### 2.3 Label comment overrides derived name
-- **Given** the line `# label: Fire & Stars` immediately precedes `[fire:layout]`
-- **When** the config is parsed
-- **Then** the layout's display label is "Fire & Stars", not "Fire"
+### 2.3 Navigation defaults and overrides
+- **Given** the `[navigation]` section is absent
+- **When** the config is loaded
+- **Then** prev/next default to raw `F16`/`F18`; an explicit `[navigation]` overrides them with raw F-keys, which must differ
 
-### 2.4 Non-adjacent label comment is ignored
-- **Given** a `# label: Custom` comment separated from its section header by a blank line
-- **When** the config is parsed
-- **Then** the layout uses the identifier-derived label, not "Custom"
+### 2.4 Navigation and keys are disjoint
+- **Given** a key appears both as a `[navigation]` key and a `[keys]` alias
+- **When** the config is loaded
+- **Then** loading fails with an error (the two sections must partition the keyspace)
 
-### 2.5 Identifier derives to title case
-- **Given** a layout section `[my_arrows:layout]` with no label comment
-- **When** the config is parsed
-- **Then** the display label is "My Arrows"
+### 2.5 Global groups apply per layer in render order
+- **Given** a `[[groups]]` section assigning keys to groups
+- **When** a layer defines only some of those keys
+- **Then** the overlay renders each group (in declaration order) containing only that layer's present keys, in the group's key order
 
-### 2.6 setlayout bindings are excluded from buttons
-- **Given** a layout section containing `f16 = setlayout(next)` and `f13 = command(rologlyphex type X)`
-- **When** the config is parsed
-- **Then** the layout's button list contains only the character from f13, not setlayout
+### 2.6 Ungrouped keys form the anonymous group first
+- **Given** a layer has typeable keys not listed in any group
+- **When** the overlay model is built
+- **Then** those keys form a single unlabeled group rendered before the named groups
 
-### 2.7 noop bindings are excluded from buttons
-- **Given** a layout section containing `alt = noop`
-- **When** the config is parsed
-- **Then** the noop binding does not appear in the button list
+### 2.7 Layer-order validation and default labels
+- **Given** `layer_order` with unknown entries, or that resolves to no layers
+- **When** the config is loaded
+- **Then** unknown entries are skipped with a warning and an empty ring is a fatal error; a layer with no `label` defaults to its name in Title Case
 
-### 2.8 macro() wrapper is stripped
-- **Given** a binding `f13 = macro(→)`
-- **When** the display character is extracted
-- **Then** the result is "→"
+## 3. Key input & layer ring
 
-### 2.9 command(rologlyphex type ...) wrapper is stripped
-- **Given** a binding `f13 = command(rologlyphex type 🔥)`
-- **When** the display character is extracted
-- **Then** the result is "🔥"
+### 3.1 Knob navigates the layer ring
+- **Given** the daemon has grabbed the navigation keys and is on a layer
+- **When** the knob next/previous key is pressed
+- **Then** the active layer advances to the next/previous entry in `layer_order`, wrapping at the ends, and the overlay shows the new layer
 
-### 2.10 Buttons appear in config-file order
-- **Given** a layout with f13=A, f14=B, f15=C in that order
-- **When** the config is parsed
-- **Then** the button list is [A, B, C] in that order
+### 3.2 Button types the active layer's glyph on release
+- **Given** the active layer binds a logical key to a glyph
+- **When** the corresponding physical key is pressed and released
+- **Then** the glyph is typed into the focused window on key **release** (not press, so the active grab does not swallow the injection)
 
-### 2.11 Bare unicode character is extracted
-- **Given** a binding `f13 = →` (no `macro()` wrapper)
-- **When** the display character is extracted
-- **Then** the result is "→"
+### 3.3 Macro keys absent from the X keymap are still grabbed
+- **Given** function keys F19–F24 have no keysym in the X keymap
+- **When** the daemon resolves keycodes to grab
+- **Then** it derives their keycodes from the evdev codes (191–202) and grabs them, so the secondary keyboard's macro keys work
 
-### 2.12 macro2() wrapper is stripped
-- **Given** a binding `f13 = macro2(400, 50, →)`
-- **When** the display character is extracted
-- **Then** the result is "→"
+### 3.4 Keymap remap is per layer change, never per keypress or on navigation
+- **Given** the user spins the knob through several layers
+- **When** navigation occurs
+- **Then** no `XChangeKeyboardMapping` is issued during navigation; the active layer's glyphs are remapped in a single call only when that layer is first typed in (lazy) or after the knob settles (debounce)
 
-### 2.13 Button label comment overrides display character
-- **Given** the line `# label: ➡` immediately precedes `f13 = macro(→)`
-- **When** the config is parsed
-- **Then** the button's display character is "➡", not "→"
+### 3.5 Lazy mode shows "Please Wait" during the remap
+- **Given** `remap_mode = "lazy"` and a freshly-entered layer
+- **When** the first key in that layer is pressed
+- **Then** a "Please Wait" overlay is shown centered across all monitors while the keymap is rebuilt, then hidden, and the glyph types
 
-### 2.14 Button label takes first character only
-- **Given** the line `# label: Right Arrow` immediately precedes a binding
-- **When** the config is parsed
-- **Then** the button's display character is "R" and a warning is logged
+### 3.6 Debounce mode remaps silently after the knob settles
+- **Given** `remap_mode = "debounce"`
+- **When** the knob stops for `nav_settle_ms`
+- **Then** the active layer is remapped in the idle gap with no indicator, so the first keypress is immediate
 
-### 2.15 Layout header must end with :layout exactly
-- **Given** a section header `[name:layout-extra]`
-- **When** the config is parsed
-- **Then** it is not treated as a layout section
-
-## 3. keyd IPC
-
-### 3.1 Daemon connects to keyd socket
-- **Given** keyd is running and `/var/run/keyd.socket` exists
-- **When** the daemon starts
-- **Then** it connects and sends an `IPC_LAYER_LISTEN` message (4112 bytes)
-
-### 3.2 Layout change events update current layout
-- **Given** the IPC connection receives `/arrows\n`
-- **When** the event is processed
-- **Then** the shared current layout becomes "arrows"
-
-### 3.3 Non-layout events are ignored
-- **Given** the IPC connection receives `+modifier\n`
-- **When** the event is processed
-- **Then** the current layout is unchanged
-
-### 3.4 /main event triggers config re-parse
-- **Given** the IPC connection receives `/main\n`
-- **When** the event is processed
-- **Then** the keyd config file is re-parsed and the layout map is updated
-
-### 3.5 Reconnection on socket closure
-- **Given** keyd is restarted and the socket closes
-- **When** the IPC thread detects the closure
-- **Then** it reconnects to the new socket after a brief delay
+### 3.7 Navigation and typeable keyspaces are disjoint
+- **Given** a layers config where a key is both a `[navigation]` key and a `[keys]` alias
+- **When** the config is loaded
+- **Then** loading fails with a clear error (the two sections must partition the keyspace)
 
 ## 4. Overlay window
 
@@ -265,6 +234,21 @@
 - **When** the daemon resolves the corner preference
 - **Then** a warning is printed and the corner defaults to top-right
 
+### 4.19 App header is shown on both windows
+- **Given** the overlay and the "Please Wait" window
+- **When** they are displayed
+- **Then** each shows a small header — the app icon followed by "Rologlyphex!" — with the rest of the content below it (the header degrades to text only if the SVG loader is unavailable)
+
+### 4.20 Header hugs the configured corner; layer title is centered
+- **Given** the overlay is configured for a corner (e.g. `bottom-left`)
+- **When** the layer overlay is shown
+- **Then** the app header aligns to that corner inside the window (horizontal side via alignment, top/bottom via placement) and the layer title is centered
+
+### 4.21 "Please Wait" window is centered across all displays
+- **Given** lazy remap mode triggers the "Please Wait" window
+- **When** it is shown
+- **Then** it is centered across the union bounding box of all monitors, distinct from the corner-aligned layer overlay
+
 ## 5. Unicode input synthesis
 
 ### 5.1 BMP character is typed via XTest
@@ -307,6 +291,11 @@
 - **When** the daemon starts
 - **Then** those keys continue to function normally
 
+### 5.8 X protocol errors are non-fatal
+- **Given** the daemon has installed its X error handlers (`xerror::install`)
+- **When** an Xlib call triggers a recoverable protocol error (e.g. `BadAccess` from `XGrabKey` when another client holds a key, or `BadWindow` on a destroyed overlay)
+- **Then** the daemon logs the error details and continues running rather than `exit()`-ing, and the daemon socket remains served
+
 ## 6. Socket IPC
 
 ### 6.1 Socket created on daemon startup
@@ -323,11 +312,6 @@
 - **Given** `rologlyphex type X` is invoked as root (no `XDG_RUNTIME_DIR`)
 - **When** it looks for the daemon socket
 - **Then** it finds it by scanning `/run/user/*/rologlyphex.sock`
-
-### 6.3a Socket discovery identifies active seat0 session
-- **Given** multiple users are logged in, each with a running daemon
-- **When** `rologlyphex type` is invoked as root
-- **Then** the socket belonging to the user with an active X11 session on seat0 is used
 
 ### 6.4 Client fails gracefully when daemon is not running
 - **Given** the daemon is not running and no socket exists
@@ -349,62 +333,31 @@
 - **When** the server reads the data
 - **Then** only the first 16 bytes are read and the connection is closed
 
-## 7. Config hot reload
+## 7. App configuration
 
-### 7.1 Config change updates overlay content
-- **Given** a layout's character binding is changed in the keyd config
-- **When** `keyd reload` is run
-- **Then** the daemon reflects the updated configuration — new characters type correctly and the overlay shows updated content — without restarting
-
-### 7.2 Adding a new layout is picked up
-- **Given** a new `[name:layout]` section is added to the keyd config
-- **When** the config is re-parsed
-- **Then** the new layout appears in the overlay when navigated to
-
-### 7.3 Updating the group configuration
-- **Given** the keyd config file's group information was changed
-- **When** the config is reparsed
-- **Then** the overlay updates to reflect the new group configuration
-
-### 7.4 Loading group configuration
-- **Given** the keyd config file's contains group information
-- **When** the config is parsed or reparsed
-- **Then** the group configuration is parsed and loaded from the `[ids]` section
-
-### 7.5 Anonymous group organization
-- **Given** the `keyd` configuration is parsed
-- **When** some keys do not belong to any groups 
-- **Then** the groupless keys appear in a separate group without a label
-
-### 7.6 Rendering anonymous groups
-- **When** groupless keys are rendered in the overlay
-- **Then** the groupless group is rendered first on-top, preceding named groups
-
-## 8. App configuration
-
-### 8.1 Default values used when no config exists
+### 7.1 Default values used when no config exists
 - **Given** no `config.toml` exists
 - **When** the daemon starts with valid CLI args
 - **Then** it starts successfully using CLI values
 
-### 8.2 Config file values override defaults
+### 7.2 Config file values override defaults
 - **Given** a `config.toml` with `timeout = 5000` and no `--timeout` CLI arg
 - **When** the daemon starts
 - **Then** it uses a 5000ms dismiss timeout
 
-### 8.3 CLI args override config file values
+### 7.3 CLI args override config file values
 - **Given** a `config.toml` with `timeout = 5000` and `--timeout 2000` CLI arg
 - **When** the daemon starts
 - **Then** it uses a 2000ms dismiss timeout
 
-### 8.4 Graceful handling of malformed config
+### 7.4 Graceful handling of malformed config
 - **Given** a malformed `config.toml`
 - **When** the daemon starts with valid CLI args
 - **Then** it logs a warning, falls back to defaults for missing values, and starts successfully
 
-## 9. Miscellaneous
+## 8. Miscellaneous
 
-### 9.1 Crash logging
+### 8.1 Crash logging
 - **Given** the daemon is running
 - **When** it encounters an unrecoverable error
 - **Then** a message identifying the failure location and cause is written to the system log

@@ -24,6 +24,55 @@ Coding, functional, and behavioural anti-patterns encountered during development
 | 18 | Full-keyboard virtual device consumes nearly all X11 keycodes, leaving only ~10 free for XTest remapping |
 | 19 | EEPROM chord modifiers (Ctrl+Alt+Shift) bleed through keyd virtual keyboard, corrupting XCompose sequences |
 | 20 | Watching the keyd config file with inotify to detect reloads |
+| 21 | `XChangeKeyboardMapping` per keycode storms `MappingNotify` and brings the whole desktop UI to its knees |
+| 22 | An `XGrabKey` active grab swallows `XTest` injection done on key press |
+| 23 | Signaling a UI progress indicator *during* a blocking keymap remap never renders it |
+
+## 22. An `XGrabKey` active grab swallows `XTest` injection done on key press
+
+**Symptom**: After grabbing F13–F24 with `XGrabKey` and injecting the replacement glyph via `XTestFakeKeyEvent` from the `KeyPress` handler, typing was unreliable: often only the first press in a layer emitted, then nothing on subsequent presses until the layer changed — yet the debug log showed every press being handled. The failure was inconsistent and timing-dependent.
+
+**What was tried**:
+- Injecting the scratch keycode via `XTestFakeKeyEvent` immediately in the `KeyPress` event handler.
+- Suspecting keycode-pool exhaustion / MappingNotify timing (real, but not the cause here).
+
+**Root cause**: An `XGrabKey` passive grab becomes an **active keyboard grab** when the key is pressed, lasting until the key is released. During the active grab, key events — including events synthesized by `XTest` — are routed to the grabbing client (with `owner_events=False`, the grab window), **not** the focused application. So the injected glyph was delivered back to us and dropped. The inconsistency was tap timing: if the physical key was released before the event loop reached the injection (active grab already ended), it landed; otherwise it was swallowed.
+
+**Resolution**: Inject on **`KeyRelease`**, not `KeyPress`. By the time the key is released the active grab has ended, so the synthetic keystroke reaches the focused window. Navigation keys (which do no injection) stay on press for responsiveness.
+
+**Lesson**: When you `XGrabKey` a key and want to inject a replacement with `XTest`, do it on key **release**, not press. The active grab held while the key is down routes synthetic key events to the grabbing client, not the focused window, so press-time injection is swallowed.
+
+## 23. Signaling a UI progress indicator *during* a blocking keymap remap never renders it
+
+**Symptom**: A "Please Wait" overlay, shown by setting a shared `AtomicBool` that the GTK 100ms poll watches, never appeared — even after holding the flag `true` for 350ms (more than three poll intervals). The grab thread logged setting the flag; the GTK poll never logged showing the window.
+
+**What was tried**:
+- Setting the flag `true`, running the remap, then holding the flag a minimum time before clearing it, trusting the 100ms poll to sample it.
+- Adding a `set_size_request` to the window and tracing the flag through every hop (the Arc sharing and the poll were both correct).
+
+**Root cause**: The remap's single `XChangeKeyboardMapping` broadcasts a `MappingNotify`, and GDK — GTK's own X client — rebuilds its keymap in response, which **blocks the GTK main loop** for the duration on a keycode-heavy system. That stall overlaps precisely the window in which the flag is `true`, so the GTK poll cannot run to display the indicator until *after* the remap, by which point the flag is already cleared.
+
+**Resolution**: Raise the flag and `sleep` a lead time (longer than the poll interval, ~220ms) **before** the remap, so the GTK poll displays the indicator while the main loop is still free. Then run the remap — which blocks GTK, but the indicator is already mapped and visible.
+
+**Lesson**: A progress indicator for a blocking operation must be made visible **before** the operation starts, not signaled to appear during it. If the operation stalls the UI thread (here, via `MappingNotify`-triggered keymap rebuilds in every X client), the UI cannot render the indicator until the operation has already finished.
+
+## 21. `XChangeKeyboardMapping` per keycode storms `MappingNotify` and brings the whole desktop UI to its knees
+
+**Symptom**: After retiring keyd and routing **all** macropad typing through rologlyphex's XTest keycode-remap path, navigating layers with the knob made the **entire desktop** sluggish — mouse scrolling stuttered, window interactions lagged, the UI "crawled." It was not confined to the daemon or the focused app; the whole X session degraded. Killing the daemon restored performance instantly.
+
+**What was tried**:
+- Per-keypress remapping (the original `XTyper` path): with the secondary keyboard leaving ~0 free keycodes (#18), every press did an `XChangeKeyboardMapping`. Typing thrashed and was unreliable (#9), but the system-wide impact was masked because typing was relatively infrequent and interleaved with idle time.
+- A per-layer batch remap — but implemented as one `XChangeKeyboardMapping` call **per scratch keycode** (10 calls), and executed on **every knob step**. The debug log of one short test showed 44 knob steps → ~**440** `XChangeKeyboardMapping` calls in rapid succession.
+
+**Root cause**: `XChangeKeyboardMapping` is not a local, per-keycode mutation — the X server broadcasts a `MappingNotify` event to **every connected client** on each call, and each client (browser, plasmashell, kwin, every GUI app) must stop and reprocess the keymap (`XRefreshKeyboardMapping`). Issuing hundreds of these in a burst (10 per keycode × dozens of knob steps) creates a server-wide event storm: every client is repeatedly interrupted to rebuild its keymap, starving the whole session of responsiveness. The cost scales with the number of connected X clients, not with the daemon's own work — which is why it surfaced as global UI degradation, not a local slowdown.
+
+**Resolution**:
+1. **Never remap on navigation.** The grab thread only publishes the active layer name on each knob step (instant overlay tracking); the keymap remap is deferred and happens lazily on the *first keypress* in a layer. Spinning the knob now causes **zero** keymap changes.
+2. **One call, not N.** `LayerTyper::set_layer` issues a **single** `XChangeKeyboardMapping` over the contiguous keycode range spanning the scratch keycodes (reading the range first to preserve every non-scratch keycode), producing **one** `MappingNotify` instead of one per key.
+
+Net: idle navigation = 0 remaps; worst case = 1 `MappingNotify` the first time you type in a freshly-entered layer (down from ~440 across a navigation session).
+
+**Lesson**: `XChangeKeyboardMapping` is a **global broadcast**, not a cheap local change — every call interrupts every X client to rebuild its keymap. Treat it as expensive and rare: (a) batch all changes into a single call over a contiguous keycode range (read the range first so neighbours are preserved), and (b) never trigger it on high-frequency or idle events (navigation, polling, hover) — only when output is actually about to happen. On a host where a keyboard-management daemon (a keyboard-management daemon + a full keyboard) already churns the keycode pool, a `MappingNotify` storm can take the entire desktop down, not just the daemon.
 
 ## 16. GTK4 FlowBox with `halign=Center` ignores allocated width; `set_default_size` ignored on realized windows
 
@@ -263,7 +312,7 @@ Coding, functional, and behavioural anti-patterns encountered during development
 
 **Resolution**: Reduced emoji layout count from 8 to 6 (60 command() calls, within the limit). The specific limit depends on the keyd version; `MAX_COMMANDS` may differ between releases. Check `journalctl -u keyd` after every config change that adds `command()` bindings.
 
-**Lesson**: keyd silently truncates `command()` bindings beyond 64 — it does not error, crash, or warn prominently. After any keyd config edit that adds `command()` entries, grep the journal for "max commands" before assuming the config is correct. If the limit must be raised, patch keyd's source (`MAX_COMMANDS` constant). Alternatively, restructure the config to use the `[main]` base layer for shared bindings so emoji layouts don't each need their own `command()` entries (requires a `rologlyphex type-nth N` client command — see PLAN.k100-integration.md).
+**Lesson**: keyd silently truncates `command()` bindings beyond 64 — it does not error, crash, or warn prominently. After any keyd config edit that adds `command()` entries, grep the journal for "max commands" before assuming the config is correct. If the limit must be raised, patch keyd's source (`MAX_COMMANDS` constant). Alternatively, restructure the config to use the `[main]` base layer for shared bindings so emoji layouts don't each need their own `command()` entries (requires a `rologlyphex type-nth N` client command). (Superseded: keyd was later retired entirely — see ANTI-PATTERNS #21–23 and TECH.md.)
 
 ## 18. A full-keyboard virtual device consumes nearly all X11 keycodes, leaving only ~10 free for XTest remapping
 

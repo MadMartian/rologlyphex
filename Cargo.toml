@@ -10,6 +10,5 @@ glib = "0.20"
 cairo-rs = "0.20"
 libc = "0.2"
 x11 = { version = "2.21", features = ["xlib", "xtest"] }
-dbus = "0.9"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

@@ -1,10 +1,14 @@
 mod client;
 mod config;
-mod ipc;
+mod layers;
+mod monitor;
 mod overlay;
 mod server;
 mod settings;
 mod socket;
+mod wmprops;
+mod xerror;
+mod xgrab;
 mod xtype;
 
 use std::sync::{Arc, RwLock, Mutex};
@@ -36,7 +40,7 @@ pub fn first_char_of(s: &str, context: &str) -> Option<char> {
     ch
 }
 
-// Mode::Daemon carries the validated keyd_config path so run_daemon never needs to unwrap.
+// Mode::Daemon carries the validated layers.toml path so run_daemon never needs to unwrap.
 enum Mode {
     Daemon(Arc<AppSettings>, String),
     Type(String),
@@ -46,11 +50,12 @@ enum Mode {
 fn print_help() {
     println!("Usage:");
     println!("  rologlyphex [-c <path>] [-t <ms>] [-s <W>] [-v]   Start overlay daemon");
+    println!("                                                      (-c is the layers.toml path)");
     println!("  rologlyphex type <char>                             Type a character via the running daemon");
     println!("  rologlyphex show                                    Re-show the overlay in its current state");
     println!();
     println!("Daemon options (can also be set in ~/.config/rologlyphex/config.toml):");
-    println!("  -c, --config <path>   Path to keyd config file");
+    println!("  -c, --config <path>   Path to layers config (default: ~/.config/rologlyphex/layers.toml)");
     println!("  -t, --timeout <ms>    Overlay dismiss timeout in milliseconds (default: 3000)");
     println!("  -s, --size <W>        Overlay window width (height calculated, default: 600)");
     println!("  -m, --monitor <id>    Monitor to show the overlay on (connector name, model, or");
@@ -98,7 +103,7 @@ fn parse_args() -> Mode {
     // Daemon mode: load settings from config file first
     let mut settings = AppSettings::load();
 
-    let mut cli_config: Option<String> = None;
+    let mut cli_layers: Option<String> = None;
     let mut cli_timeout_ms: Option<u64> = None;
     let mut cli_size: Option<String> = None;
     let mut cli_verbose: Option<bool> = None;
@@ -111,7 +116,7 @@ fn parse_args() -> Mode {
                 cli_verbose = Some(true);
             }
             "--config" | "-c" => {
-                cli_config = Some(iter.next().unwrap_or_else(|| {
+                cli_layers = Some(iter.next().unwrap_or_else(|| {
                     eprintln!("Error: --config requires a path argument");
                     std::process::exit(1);
                 }).clone());
@@ -156,22 +161,17 @@ fn parse_args() -> Mode {
         }
     }
 
-    settings.merge_cli(cli_config, cli_timeout_ms, cli_size, cli_verbose, cli_monitor, cli_corner);
+    settings.merge_cli(cli_layers, cli_timeout_ms, cli_size, cli_verbose, cli_monitor, cli_corner);
 
     if settings.verbose.unwrap_or(false) {
         DEBUG_ENABLED.store(true, Ordering::Relaxed);
     }
 
-    let keyd_config = match settings.keyd_config.clone() {
-        Some(p) => p,
-        None => {
-            eprintln!("Error: keyd config path must be specified via --config or in config.toml");
-            print_help();
-            std::process::exit(1);
-        }
-    };
+    let layers_path = settings.layers.clone().unwrap_or_else(|| {
+        AppSettings::default_layers_path().to_string_lossy().into_owned()
+    });
 
-    Mode::Daemon(Arc::new(settings), keyd_config)
+    Mode::Daemon(Arc::new(settings), layers_path)
 }
 
 const DEFAULT_WIDTH: i32 = 600;
@@ -202,28 +202,30 @@ fn main() {
         Mode::Show => {
             client::send_show();
         }
-        Mode::Daemon(args, keyd_config) => {
-            run_daemon(args, keyd_config);
+        Mode::Daemon(args, layers_path) => {
+            run_daemon(args, layers_path);
         }
     }
 }
 
-fn run_daemon(settings: Arc<AppSettings>, keyd_config: String) {
-    // Parse config at startup
-    let layout_map = match config::ConfigParser::parse(&keyd_config) {
-        Ok(map) => {
-            debug_log!("[🐛DEBUG] Parsed {} layouts from {}", map.len(), keyd_config);
-            map
+fn run_daemon(settings: Arc<AppSettings>, layers_path: String) {
+    // Load the layers glyph-map / navigation-ring config (rologlyphex owns this; keyd is gone).
+    let cfg = match layers::LayersConfig::load(&layers_path) {
+        Ok(c) => {
+            debug_log!("[🐛DEBUG] Loaded {} layers from {}", c.layer_order.len(), layers_path);
+            c
         }
         Err(e) => {
-            eprintln!("Error parsing config: {}", e);
+            eprintln!("Error loading layers config '{}': {}", layers_path, e);
             std::process::exit(1);
         }
     };
 
-    let layout_map = Arc::new(RwLock::new(layout_map));
-    let timeout_ms = settings.timeout.unwrap_or(3000);
+    let initial_layer = cfg.layer_order[0].clone();
+    let layout_map = Arc::new(RwLock::new(cfg.overlay.clone()));
+    let cfg = Arc::new(cfg);
 
+    let timeout_ms = settings.timeout.unwrap_or(3000);
     let window_width = if let Some(size_str) = &settings.size {
         let width = size_str.trim().parse::<i32>().unwrap_or(-1);
         if width <= 0 {
@@ -235,67 +237,75 @@ fn run_daemon(settings: Arc<AppSettings>, keyd_config: String) {
         DEFAULT_WIDTH
     };
 
-    // Shared state accessed by multiple threads
-    let shared = ipc::SharedState {
-        layout_map: layout_map.clone(),
-        current_layout: Arc::new(Mutex::new(String::from("main"))),
-        config_path: Arc::new(keyd_config),
-        reload_flag: Arc::new(AtomicBool::new(false)),
-        config_reload_flag: Arc::new(AtomicBool::new(false)),
-    };
-
-    // Flag to signal on-demand overlay re-display
+    // Shared state. The grab thread publishes the active layer name to `current_layout`,
+    // which the GTK poll loop watches to show the overlay.
+    let current_layout = Arc::new(Mutex::new(initial_layer.clone()));
     let show_requested = Arc::new(AtomicBool::new(false));
+    // Set by the grab thread (lazy remap mode) while it rebuilds the keymap; the GTK poll
+    // shows/hides the "Please Wait" overlay accordingly.
+    let please_wait = Arc::new(AtomicBool::new(false));
 
     // GTK Application setup
     let app = Application::builder()
         .application_id("com.extollit.rologlyphex")
         .build();
 
-    let shared_gtk = shared.clone();
+    let layout_map_gtk = layout_map.clone();
+    let current_layout_gtk = current_layout.clone();
     let show_requested_gtk = show_requested.clone();
+    let please_wait_gtk = please_wait.clone();
     let monitor_pref = settings.monitor.clone();
     let corner = settings.corner.clone();
+    let initial_layer_gtk = initial_layer.clone();
     app.connect_activate(move |app| {
         // Hold guard keeps the app alive even when all windows are hidden.
         // Captured by the timer closure below so it lives for the app's lifetime.
         let hold = app.hold();
 
+        // Install our non-fatal X error handlers now that GDK has opened the display (GTK
+        // sets its own during init; calling here makes ours win process-wide, covering the
+        // overlay, the XTyper display, and the key-grab display). See xerror.rs.
+        xerror::install();
+
         let window = overlay::OverlayWindow::new(
             app,
-            shared_gtk.layout_map.clone(),
+            layout_map_gtk.clone(),
             timeout_ms,
             window_width,
             monitor_pref.clone(),
             corner.clone(),
         );
 
-        // Poll for layout changes and update window
-        let current_layout = shared_gtk.current_layout.clone();
+        // Poll for layer changes (published by the grab thread) and update the overlay.
+        let current_layout = current_layout_gtk.clone();
         let window_clone = window.clone();
-        let config_reload_flag = shared_gtk.config_reload_flag.clone();
         let show_requested = show_requested_gtk.clone();
-        let mut last_layout = String::from("main");
-        let mut first_change = true;
+        let please_wait = please_wait_gtk.clone();
+        // Starts equal to the published initial layer, so no overlay shows until the user
+        // actually navigates.
+        let mut last_layout = initial_layer_gtk.clone();
+        let mut wait_shown = false;
 
         glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
             // Hold guard captured here -- prevents app from quitting while timer runs
             let _ = &hold;
 
-            let config_reloaded = config_reload_flag.swap(false, Ordering::Relaxed);
             let show = show_requested.swap(false, Ordering::Relaxed);
+
+            // Show/hide the "Please Wait" overlay (lazy remap mode) on flag edges.
+            let wait = please_wait.load(Ordering::Relaxed);
+            if wait && !wait_shown {
+                window_clone.show_please_wait();
+                wait_shown = true;
+            } else if !wait && wait_shown {
+                window_clone.hide_please_wait();
+                wait_shown = false;
+            }
 
             // M-3: recover from poisoned mutex rather than silently freezing the poll loop
             let layout = current_layout.lock().unwrap_or_else(|e| e.into_inner());
-            if *layout != last_layout || config_reloaded {
-                // Skip the initial /main event from keyd connect
-                if first_change && *layout == "main" && !config_reloaded {
-                    first_change = false;
-                    last_layout = layout.clone();
-                    return glib::ControlFlow::Continue;
-                }
-                first_change = false;
-                debug_log!("[🐛DEBUG] Layout changed to: {} (reloaded={})", *layout, config_reloaded);
+            if *layout != last_layout {
+                debug_log!("[🐛DEBUG] Layout changed to: {}", *layout);
                 window_clone.show_layout(&layout);
                 last_layout = layout.clone();
             } else if show {
@@ -324,19 +334,30 @@ fn run_daemon(settings: Arc<AppSettings>, keyd_config: String) {
         });
     });
 
-    // Spawn IPC listener thread
-    let shared_ipc = shared.clone();
+    // Spawn the key-grab input thread (replaces the keyd IPC listener). It grabs F13–F24,
+    // owns the layer ring, and types via XTest.
+    let cfg_grab = cfg.clone();
+    let current_layout_grab = current_layout.clone();
+    let nav_settle_ms = settings.nav_settle_ms.unwrap_or(160).min(i32::MAX as u64) as i32;
+    let remap_mode = match settings.remap_mode.as_deref() {
+        Some("debounce") => xgrab::RemapMode::Debounce,
+        Some("lazy") | None => xgrab::RemapMode::Lazy,
+        Some(other) => {
+            eprintln!("Warning: unknown remap_mode '{}', using 'lazy'", other);
+            xgrab::RemapMode::Lazy
+        }
+    };
+    let please_wait_grab = please_wait.clone();
     thread::spawn(move || {
-        if let Err(e) = ipc::listen_to_keyd(shared_ipc) {
-            eprintln!("IPC listener error: {}", e);
+        if let Err(e) = xgrab::run(cfg_grab, current_layout_grab, nav_settle_ms, remap_mode, please_wait_grab) {
+            eprintln!("Key-grab thread error: {}", e);
         }
     });
 
-    // Spawn type-command socket server thread
-    let reload_flag_server = shared.reload_flag.clone();
+    // Spawn the socket server thread (manual `rologlyphex type` / `show`).
     let show_requested_server = show_requested.clone();
     thread::spawn(move || {
-        if let Err(e) = server::run_server(reload_flag_server, show_requested_server) {
+        if let Err(e) = server::run_server(show_requested_server) {
             eprintln!("Socket server error: {}", e);
         }
     });

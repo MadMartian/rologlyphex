@@ -1,7 +1,8 @@
 use x11::xlib;
 use x11::xtest;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ptr;
+use std::time::{Duration, Instant};
 use crate::debug_log;
 
 /// Persistent X11 connection for typing characters via XTest.
@@ -44,17 +45,6 @@ impl XTyper {
         Ok(typer)
     }
 
-    pub fn rescan(&mut self) {
-        self.cache.clear();
-        self.free_keycodes.clear();
-        self.lru_order.clear();
-        self.scan_keycodes();
-        debug_log!(
-            "[🐛DEBUG] XTyper rescan: {} free keycodes, {} reclaimed",
-            self.free_keycodes.len(),
-            self.cache.len()
-        );
-    }
 
     fn scan_keycodes(&mut self) {
         let mut min_kc: i32 = 0;
@@ -192,5 +182,170 @@ fn unicode_to_keysym(ch: char) -> xlib::KeySym {
         cp as xlib::KeySym
     } else {
         (0x01000000 + cp) as xlib::KeySym
+    }
+}
+
+/// Batch-remap typist for the key-grab model (see sdd/ANTI-PATTERNS.md #18).
+/// Only one layer (≤ the number of logical keys) is active at a
+/// time, so instead of remapping a keycode on every keypress — which thrashes when the
+/// secondary keyboard leaves ~0 free keycodes, storming MappingNotify (#9) — each logical button is
+/// assigned a stable scratch keycode once, and the whole set is remapped to the active
+/// layer's glyphs in a single batch per layer change. A button press then just fires its
+/// scratch keycode: no remap, no MappingNotify.
+pub struct LayerTyper {
+    display: *mut xlib::Display,
+    /// logical key name -> its dedicated scratch keycode.
+    index: HashMap<String, u8>,
+}
+
+// SAFETY: owns a dedicated Xlib Display connection, used only by the key-grab thread.
+unsafe impl Send for LayerTyper {}
+
+impl LayerTyper {
+    /// Open a dedicated display and assign each logical key a scratch keycode. `exclude` lists
+    /// keycodes that must never be used (the grabbed F13–F24 keycodes — one of which, F24,
+    /// carries the Unicode keysym U2764 and would otherwise be reclaimed; see #14).
+    pub fn open(logical_keys: &[String], exclude: &HashSet<u8>) -> Result<Self, String> {
+        let display = unsafe { xlib::XOpenDisplay(ptr::null()) };
+        if display.is_null() {
+            return Err("LayerTyper: cannot open X11 display".to_string());
+        }
+
+        let (scratch, _width) = Self::scan_scratch(display, exclude, logical_keys.len())
+            .map_err(|e| {
+                unsafe { xlib::XCloseDisplay(display) };
+                e
+            })?;
+
+        let index: HashMap<String, u8> = logical_keys
+            .iter()
+            .cloned()
+            .zip(scratch.iter().copied())
+            .collect();
+
+        debug_log!("[🐛DEBUG] LayerTyper: assigned {} scratch keycodes {:?}", index.len(), scratch);
+        Ok(LayerTyper { display, index })
+    }
+
+    /// Find `needed` usable scratch keycodes, preferring free (all-NoSymbol) ones, then
+    /// keycodes already holding our Unicode mappings (reclaimable). Scans high→low to avoid
+    /// the low keycodes near min_kc that XTest silently swallows (#13), skipping `exclude`.
+    fn scan_scratch(
+        display: *mut xlib::Display,
+        exclude: &HashSet<u8>,
+        needed: usize,
+    ) -> Result<(Vec<u8>, i32), String> {
+        let (mut min_kc, mut max_kc): (i32, i32) = (0, 0);
+        unsafe { xlib::XDisplayKeycodes(display, &mut min_kc, &mut max_kc) };
+
+        let mut width = 0i32;
+        let mut free = Vec::new();
+        let mut reclaim = Vec::new();
+
+        for kc in (min_kc..=max_kc).rev() {
+            if kc <= min_kc {
+                continue; // avoid min_kc (#13)
+            }
+            let kcu = kc as u8;
+            if exclude.contains(&kcu) {
+                continue;
+            }
+            let mut n = 0;
+            let mapping = unsafe { xlib::XGetKeyboardMapping(display, kcu, 1, &mut n) };
+            if mapping.is_null() {
+                continue;
+            }
+            if width == 0 {
+                width = n;
+            }
+            let first = unsafe { *mapping };
+            let all_empty =
+                (0..n as usize).all(|i| unsafe { *mapping.add(i) == xlib::NoSymbol as xlib::KeySym });
+            unsafe { xlib::XFree(mapping as *mut _) };
+
+            if all_empty {
+                free.push(kcu);
+            } else if (0x01000000..=0x0110FFFF).contains(&first) {
+                reclaim.push(kcu); // a Unicode keysym -> one of ours from a prior session
+            }
+        }
+
+        let scratch: Vec<u8> = free.into_iter().chain(reclaim).take(needed).collect();
+        if scratch.len() < needed {
+            return Err(format!(
+                "LayerTyper: only {} scratch keycodes available, need {} (X11 keycode pool exhausted — see ANTI-PATTERNS #18)",
+                scratch.len(),
+                needed
+            ));
+        }
+        Ok((scratch, width.max(1)))
+    }
+
+    /// Remap the scratch keycodes to the active layer's glyphs in a **single**
+    /// `XChangeKeyboardMapping` over the contiguous keycode range that spans them, preserving
+    /// every non-scratch keycode in that range. One call = one `MappingNotify` broadcast.
+    ///
+    /// This is critical: issuing one `XChangeKeyboardMapping` per scratch keycode produced a
+    /// `MappingNotify` storm that forced every X client to reprocess the keymap, degrading
+    /// whole-system performance (mouse, scrolling). See sdd/ANTI-PATTERNS.md.
+    pub fn set_layer(&self, glyphs: &HashMap<String, char>) {
+        if self.index.is_empty() {
+            return;
+        }
+        let t0 = Instant::now();
+        let min = *self.index.values().min().unwrap();
+        let max = *self.index.values().max().unwrap();
+        let count = max as i32 - min as i32 + 1;
+
+        unsafe {
+            // Read the current keysyms for the whole range so non-scratch keycodes are
+            // preserved exactly (the grabbed F13–F24 and any real keys in the range).
+            let mut width = 0;
+            let existing = xlib::XGetKeyboardMapping(self.display, min, count, &mut width);
+            if existing.is_null() || width <= 0 {
+                return;
+            }
+            let w = width as usize;
+            let mut syms: Vec<xlib::KeySym> =
+                std::slice::from_raw_parts(existing, count as usize * w).to_vec();
+            xlib::XFree(existing as *mut _);
+
+            for (logical, &kc) in &self.index {
+                let row = (kc - min) as usize * w;
+                let keysym = match glyphs.get(logical) {
+                    Some(&ch) => unicode_to_keysym(ch),
+                    None => xlib::NoSymbol as xlib::KeySym,
+                };
+                syms[row] = keysym;
+                // Clear higher levels so Shift/etc. can't yield a different glyph.
+                for level in 1..w {
+                    syms[row + level] = xlib::NoSymbol as xlib::KeySym;
+                }
+            }
+
+            xlib::XChangeKeyboardMapping(self.display, min as i32, w as i32, syms.as_ptr() as *mut _, count);
+            xlib::XSync(self.display, xlib::False);
+        }
+        // Let clients process the single MappingNotify before the next keypress (#9).
+        std::thread::sleep(Duration::from_millis(MAPPING_NOTIFY_SETTLE_MS));
+        debug_log!("[🐛DEBUG] set_layer: remapped {} keys over range {}..={} in {:?}",
+            self.index.len(), min, max, t0.elapsed());
+    }
+
+    /// Fire the scratch keycode bound to `logical` (no remap).
+    pub fn press(&self, logical: &str) {
+        if let Some(&kc) = self.index.get(logical) {
+            unsafe {
+                xtest::XTestFakeKeyEvent(self.display, kc as u32, xlib::True, 0);
+                xtest::XTestFakeKeyEvent(self.display, kc as u32, xlib::False, 0);
+                xlib::XFlush(self.display);
+            }
+        }
+    }
+}
+
+impl Drop for LayerTyper {
+    fn drop(&mut self) {
+        unsafe { xlib::XCloseDisplay(self.display) };
     }
 }

@@ -11,23 +11,21 @@
 
 ### Unit tests
 
-- The config parser (`config.rs`) must have unit tests covering:
-  - Layout header detection (valid and invalid formats, including false-positive suffixes)
-  - Label comment parsing (`# label:` present, absent, non-adjacent)
-  - Identifier-to-label derivation (snake_case to Title Case)
-  - Display character extraction from `macro()`, `macro2()`, bare unicode, `command(rologlyphex type ...)`, and `command(xdotool type ...)`
-  - `setlayout()` and `noop` binding exclusion
-  - Per-button label override via `# label:` comment (single-char extraction, extra chars warning)
+- The layers config parser (`layers.rs`) must have unit tests covering:
+  - Alias resolution: `[keys]` physical→logical mapping; typing keyed by logical name; physical-key references resolving to their logical name
+  - Navigation: `[navigation]` raw F-keys, defaults (F16/F18), the disjointness rule (a key may not be both a navigation key and a `[keys]` alias), and distinct prev/next
+  - Grouping: global `[[groups]]` applied per layer in render order; ungrouped keys forming the anonymous group first
+  - Validation: unknown `layer_order` entries skipped; empty ring rejected; default-label title-casing
+- The pure overlay-positioning logic (`overlay.rs` `Corner`) must have unit tests for parse and per-corner placement.
 - Run with `cargo test`
 
 ### Manual integration testing
 
-- After any change to overlay, IPC, or input synthesis code, verify end-to-end by:
-  1. Building and installing the binary
-  2. Restarting the daemon (via `trouble-run.sh` or systemd)
-  3. Cycling through all layouts with the knob -- overlay must appear with correct content
-  4. Pressing buttons on at least two layouts -- characters must appear in the focused window
-  5. Editing the keyd config and running `keyd reload` -- overlay must reflect changes without daemon restart
+- After any change to the overlay, key-grab input, or typing code, verify end-to-end by:
+  1. Building and (re)starting the daemon (foreground `cargo run -- -v` for direct control, or via systemd)
+  2. Cycling through all layers with the knob -- overlay must track the knob in real time, and navigation must not cause whole-desktop sluggishness (ANTI-PATTERNS #21)
+  3. Pressing buttons on at least two layers (both macropad and secondary-keyboard keys) -- the glyph must appear in the focused window on key release, reliably across repeated presses
+  4. Editing `layers.toml` and restarting the daemon -- the new glyph map must take effect
 
 ## Input and output sanitization
 
@@ -35,10 +33,9 @@ All data crossing system boundaries must be validated:
 
 - **Minimum and maximum length**: every input and output must have a defined minimum and maximum length, enforced at the point of ingress or egress
 - **Client socket**: the `type` command accepts exactly one Unicode character (1-4 bytes UTF-8). The server enforces a 16-byte read limit and extracts only the first character, logging a warning if extra characters are received
-- **keyd IPC**: incoming data is buffered and processed only as complete newline-terminated lines; partial reads are retained for the next read cycle
+- **Grabbed keys**: only the configured function keys (F13–F24, minus the navigation keys) are grabbed; unknown keycodes/events are ignored
 - **CLI arguments**: validated at parse time with clear error messages for missing, malformed, or out-of-range values (e.g. `--size` must have positive dimensions)
-- **Config file**: the daemon loads settings from `~/.config/rologlyphex/config.toml` (or `$XDG_CONFIG_HOME/rologlyphex/config.toml`) at startup. CLI arguments always override values found in the config file. A missing config file is not an error.
-- **Config parsing**: layout section headers must match `[name:layout]` exactly (not partial matches like `[name:layout-extra]`)
+- **Config files**: the daemon loads `~/.config/rologlyphex/config.toml` (settings) and `~/.config/rologlyphex/layers.toml` (glyph map) at startup. CLI arguments override config.toml values; a missing config.toml is not an error, but a missing/invalid layers.toml is fatal. Unknown or out-of-range references in layers.toml are skipped with a warning (see SCHEMA.md validation)
 
 ## Code style
 
@@ -47,13 +44,14 @@ All data crossing system boundaries must be validated:
 - Use the `debug_log!` macro for all debug output (gated behind `--verbose` / `-v`)
 - Keep `unsafe` blocks minimal and adjacent to the FFI call they wrap
 - Do not add dependencies without justification; prefer stdlib and existing crates
+- Source files that exceed 500 lines are discouraged; notify the operator and refactor if approved
 
 ## Dependencies
 
 - Do not add crates for functionality achievable with existing dependencies or stdlib
 - The `x11` crate provides Xlib and XTest bindings -- do not add separate X11 binding crates
 - GTK4 bindings (`gtk4`, `gdk4`, `glib`, `cairo-rs`) are the UI framework -- do not introduce alternative UI toolkits
-- Config reload is driven by keyd's `/main` IPC event, not by filesystem watching -- do not add file-watching crates (inotify is an anti-pattern here; see ANTI-PATTERNS #20)
+- Input comes from grabbing the device function keys at the X11 level (`XGrabKey`), not from keyd IPC or filesystem watching -- do not reintroduce keyd, an IPC dependency, or file-watching crates (see ANTI-PATTERNS #20, and the keyd-retirement history in TECH.md)
 
 ## Architecture rules
 
@@ -61,15 +59,16 @@ All data crossing system boundaries must be validated:
 - Overlay window properties must be set via direct Xlib calls, never via external commands (`xdotool`, `xprop`, `wmctrl`)
 - Input synthesis must use XTest via Xlib, never by shelling out to `xdotool`
 - The overlay must never steal focus or intercept input events
-- The socket server thread must not block or interfere with the GTK main loop
-- Config parsing must derive all layout metadata from the keyd config file -- no separate metadata files
+- The key-grab and socket-server threads must not block or interfere with the GTK main loop, and each must use its own Xlib `Display` (never share a connection across threads)
+- Keymap changes (`XChangeKeyboardMapping`) must be batched into a single call per layer change and never issued per keypress or on navigation (ANTI-PATTERNS #21); injection via `XTest` must happen on key release, not press (ANTI-PATTERNS #22)
+- All layer metadata and glyphs come from `layers.toml`; physical function keys (F13–F24) must not appear in runtime state or logging beyond the `[keys]`/`[navigation]` config and the grab boundary
 - The application requires an X11 display server; Wayland is not supported. The daemon detects the GDK backend at startup and exits with a clear error if X11 is not active
 
 ## Deployment
 
-- The systemd user service file (`rologlyphex.service`) must be kept in sync with CLI flag changes
+- The systemd user service file (`rologlyphex.service`) must be kept in sync with CLI flag changes (it must not pass a keyd config path; the daemon now loads `layers.toml`)
 - The Makefile `install` target is the canonical install method
-- The user must be in the `keyd` group for IPC access; this is a documented prerequisite, not something the application should attempt to fix at runtime
+- The daemon runs as a normal user-session X client -- no root, no `input`-group membership, no keyd group is required (the X server delivers the grabbed F13–F24 keys directly)
 
 ## Privacy and attribution
 

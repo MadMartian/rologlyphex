@@ -1,11 +1,11 @@
 [Unit]
 Description=Rologlyphex - Macropad Layout Overlay
-After=graphical-session.target keyd.service
-Wants=keyd.service
+After=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/rologlyphex --config /etc/keyd/macropad.conf
+# No --config: the daemon defaults to ~/.config/rologlyphex/layers.toml.
+ExecStart=/usr/local/bin/rologlyphex
 Restart=always
 RestartSec=5
 StandardOutput=journal
