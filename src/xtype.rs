@@ -1,6 +1,5 @@
 use x11::xlib;
 use x11::xtest;
-use x11::keysym;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ptr;
 use std::time::{Duration, Instant};
@@ -201,11 +200,6 @@ pub struct LayerTyper {
     display: *mut xlib::Display,
     /// logical key name -> its dedicated scratch keycode.
     index: HashMap<String, u8>,
-    /// 1×1 unmapped window that owns the CLIPBOARD selection during a non-BMP paste.
-    clip_window: xlib::Window,
-    clipboard: xlib::Atom,
-    utf8_string: xlib::Atom,
-    targets: xlib::Atom,
 }
 
 // SAFETY: owns a dedicated Xlib Display connection, used only by the key-grab thread.
@@ -233,19 +227,8 @@ impl LayerTyper {
             .zip(scratch.iter().copied())
             .collect();
 
-        // Hidden selection-owner window + interned atoms for the non-BMP clipboard path.
-        let (clip_window, clipboard, utf8_string, targets) = unsafe {
-            let root = xlib::XDefaultRootWindow(display);
-            (
-                xlib::XCreateSimpleWindow(display, root, 0, 0, 1, 1, 0, 0, 0),
-                xlib::XInternAtom(display, b"CLIPBOARD\0".as_ptr() as *const _, xlib::False),
-                xlib::XInternAtom(display, b"UTF8_STRING\0".as_ptr() as *const _, xlib::False),
-                xlib::XInternAtom(display, b"TARGETS\0".as_ptr() as *const _, xlib::False),
-            )
-        };
-
         debug_log!("[🐛DEBUG] LayerTyper: assigned {} scratch keycodes {:?}", index.len(), scratch);
-        Ok(LayerTyper { display, index, clip_window, clipboard, utf8_string, targets })
+        Ok(LayerTyper { display, index })
     }
 
     /// Find `needed` usable scratch keycodes, preferring free (all-NoSymbol) ones, then
@@ -360,191 +343,6 @@ impl LayerTyper {
                 xtest::XTestFakeKeyEvent(self.display, kc as u32, xlib::True, 0);
                 xtest::XTestFakeKeyEvent(self.display, kc as u32, xlib::False, 0);
                 xlib::XFlush(self.display);
-            }
-        }
-    }
-
-    /// Deliver `text` via the X11 CLIPBOARD selection: claim ownership, synthesize Ctrl+V,
-    /// and serve the SelectionRequest protocol. Used for non-BMP glyphs when an AWT window is
-    /// focused (the keysym path truncates them there; see sdd/PLAN.non-BMP.md).
-    ///
-    /// Release is **event-driven** — ownership is held until the consumer's data request
-    /// (UTF8_STRING/STRING) is actually answered, then a short grace window (a slow JVM
-    /// re-polls TARGETS repeatedly), then released. This is the ANTI-PATTERNS #24 fix: a fixed
-    /// timeout dropped ownership before the asynchronous consumer requested the data. The
-    /// hard cap is only a backstop for a consumer that never requests at all.
-    ///
-    /// Caveat: this clobbers the user's CLIPBOARD (no save/restore yet — see the plan).
-    pub fn paste_via_clipboard(&self, text: &str) {
-        let text_bytes = text.as_bytes();
-        const GRACE: Duration = Duration::from_millis(250);
-        const HARD_CAP: Duration = Duration::from_millis(1500);
-
-        self.drain_events();
-        if !self.claim_clipboard() {
-            eprintln!("[🐛DEBUG] clipboard: failed to claim CLIPBOARD ownership");
-            return;
-        }
-        self.send_ctrl_v();
-
-        // Serve requests until the data request is answered + grace, or the backstop fires.
-        // All timing/control flow here is safe Rust; only the per-event FFI is unsafe (below).
-        let start = Instant::now();
-        let mut served_at: Option<Instant> = None;
-        loop {
-            if served_at.is_some_and(|t| t.elapsed() >= GRACE) {
-                break;
-            }
-            if start.elapsed() >= HARD_CAP {
-                if served_at.is_none() {
-                    eprintln!("[🐛DEBUG] clipboard: data never requested before backstop");
-                }
-                break;
-            }
-            match self.poll_event() {
-                Some(ev) => {
-                    // SAFETY: `type_` is the common initial member of the XEvent union and is
-                    // valid to read for any variant.
-                    if unsafe { ev.type_ } == xlib::SelectionRequest {
-                        // SAFETY: the tag just read confirms the `selection_request` union
-                        // member is the active one.
-                        let req = unsafe { ev.selection_request };
-                        let is_data = req.target != self.targets;
-                        self.handle_selection_request(&req, text_bytes);
-                        if is_data {
-                            served_at = Some(Instant::now()); // (re)start grace on each data serve
-                        }
-                    }
-                }
-                None => std::thread::sleep(Duration::from_millis(5)),
-            }
-        }
-
-        self.release_clipboard(); // save/restore of the prior clipboard is future work
-    }
-
-    /// Answer one SelectionRequest: TARGETS -> the formats we serve; UTF8_STRING/STRING ->
-    /// the bytes; anything else -> refusal (property = None). Also honors the obsolete
-    /// `property == None` requestor convention.
-    fn handle_selection_request(&self, req: &xlib::XSelectionRequestEvent, text_bytes: &[u8]) {
-        // Obsolete-client convention: a None property means "store under the target atom".
-        let property = if req.property == 0 { req.target } else { req.property };
-
-        let answered = if req.target == self.targets {
-            let supported = [self.utf8_string, xlib::XA_STRING, self.targets];
-            // SAFETY: display valid; requestor is the requesting window; `supported` is a live
-            // [Atom; 3] borrowed only for the duration of this synchronous call.
-            unsafe {
-                xlib::XChangeProperty(
-                    self.display, req.requestor, property,
-                    xlib::XA_ATOM, 32, xlib::PropModeReplace,
-                    supported.as_ptr() as *const u8, supported.len() as i32,
-                );
-            }
-            true
-        } else if req.target == self.utf8_string || req.target == xlib::XA_STRING {
-            // SAFETY: as above; `text_bytes` outlives this synchronous call.
-            unsafe {
-                xlib::XChangeProperty(
-                    self.display, req.requestor, property,
-                    req.target, 8, xlib::PropModeReplace,
-                    text_bytes.as_ptr(), text_bytes.len() as i32,
-                );
-            }
-            true
-        } else {
-            false // unsupported target -> refuse
-        };
-
-        // On success echo the granted property; on refusal reply with None (0).
-        self.send_selection_notify(req, if answered { property } else { 0 });
-    }
-
-    /// Reply to a requestor with a SelectionNotify. `property` is the granted property atom,
-    /// or 0 (None) to signal refusal.
-    fn send_selection_notify(&self, req: &xlib::XSelectionRequestEvent, property: xlib::Atom) {
-        // Fully initialized via struct literal (no zeroed union), so only the send is unsafe.
-        let mut notify = xlib::XSelectionEvent {
-            type_: xlib::SelectionNotify,
-            serial: 0,
-            send_event: xlib::True,
-            display: self.display,
-            requestor: req.requestor,
-            selection: req.selection,
-            target: req.target,
-            property,
-            time: req.time,
-        };
-        // SAFETY: `notify` is fully initialized above; XSendEvent copies the event into the
-        // server's queue and retains no pointer to it.
-        unsafe {
-            xlib::XSendEvent(self.display, req.requestor, xlib::False, 0,
-                &mut notify as *mut _ as *mut xlib::XEvent);
-            xlib::XFlush(self.display);
-        }
-    }
-
-    // --- Small, documented FFI helpers (keep the unsafe surface narrow) ---
-
-    /// Synthesize a Ctrl+V keystroke into the focused window via XTest.
-    fn send_ctrl_v(&self) {
-        // SAFETY: self.display is a live Xlib connection owned by this LayerTyper and used
-        // only from the grab thread. These calls take no ownership and are sound on any live
-        // display/keycode.
-        unsafe {
-            let ctrl = xlib::XKeysymToKeycode(self.display, keysym::XK_Control_L as u64);
-            let v = xlib::XKeysymToKeycode(self.display, keysym::XK_v as u64);
-            xtest::XTestFakeKeyEvent(self.display, ctrl as u32, xlib::True, 0);
-            xtest::XTestFakeKeyEvent(self.display, v as u32, xlib::True, 0);
-            xtest::XTestFakeKeyEvent(self.display, v as u32, xlib::False, 0);
-            xtest::XTestFakeKeyEvent(self.display, ctrl as u32, xlib::False, 0);
-            xlib::XFlush(self.display);
-        }
-    }
-
-    /// Claim CLIPBOARD ownership with our hidden window; returns whether the claim stuck.
-    fn claim_clipboard(&self) -> bool {
-        // SAFETY: `clipboard` was interned and `clip_window` created on `self.display` in
-        // open(); all three remain valid for the lifetime of this LayerTyper.
-        unsafe {
-            xlib::XSetSelectionOwner(self.display, self.clipboard, self.clip_window, xlib::CurrentTime);
-            xlib::XFlush(self.display);
-            xlib::XGetSelectionOwner(self.display, self.clipboard) == self.clip_window
-        }
-    }
-
-    /// Release CLIPBOARD ownership back to None.
-    fn release_clipboard(&self) {
-        // SAFETY: see claim_clipboard; releasing ownership to None is always valid.
-        unsafe {
-            xlib::XSetSelectionOwner(self.display, self.clipboard, 0, xlib::CurrentTime);
-            xlib::XFlush(self.display);
-        }
-    }
-
-    /// Discard everything currently queued on our connection.
-    fn drain_events(&self) {
-        // SAFETY: display valid; XEvent is plain-old-data, and XNextEvent fully writes it
-        // (only called while XPending reports a queued event).
-        unsafe {
-            while xlib::XPending(self.display) > 0 {
-                let mut discard: xlib::XEvent = std::mem::zeroed();
-                xlib::XNextEvent(self.display, &mut discard);
-            }
-        }
-    }
-
-    /// Pop the next queued event, or None if the queue is currently empty.
-    fn poll_event(&self) -> Option<xlib::XEvent> {
-        // SAFETY: XPending queries the queue length; when it reports > 0, XNextEvent fully
-        // initializes the event it writes.
-        unsafe {
-            if xlib::XPending(self.display) > 0 {
-                let mut ev: xlib::XEvent = std::mem::zeroed();
-                xlib::XNextEvent(self.display, &mut ev);
-                Some(ev)
-            } else {
-                None
             }
         }
     }

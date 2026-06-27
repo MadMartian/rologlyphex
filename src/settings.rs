@@ -22,7 +22,7 @@ pub struct AppSettings {
     /// keypress, with a "Please Wait" overlay) or "debounce" (after the knob settles, no
     /// indicator). Default "lazy".
     pub remap_mode: Option<String>,
-    /// Non-BMP (emoji, U+10000+) clipboard-routing settings. See sdd/PLAN.non-BMP.md.
+    /// Non-BMP (emoji, U+10000+) clipboard-routing settings. See sdd/TECH.md and sdd/SCHEMA.md.
     pub non_bmp: Option<NonBmpSettings>,
 }
 

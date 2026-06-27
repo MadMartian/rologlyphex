@@ -1,5 +1,6 @@
 mod awtfocus;
 mod client;
+mod clipserve;
 mod config;
 mod layers;
 mod monitor;

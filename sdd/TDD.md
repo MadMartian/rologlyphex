@@ -10,6 +10,7 @@
 | 6 | Socket IPC | 6.1 – 6.7  |
 | 7 | App configuration | 7.1 – 7.4  |
 | 8 | Miscellaneous | 8.1        |
+| 9 | Non-BMP emoji routing | 9.1 – 9.6  |
 
 ## 1. CLI dispatch
 
@@ -361,3 +362,35 @@
 - **Given** the daemon is running
 - **When** it encounters an unrecoverable error
 - **Then** a message identifying the failure location and cause is written to the system log
+
+## 9. Non-BMP emoji routing
+
+### 9.1 Emoji into a whitelisted Java/AWT app is delivered by clipboard paste
+- **Given** a layer binds a key to a non-BMP glyph (e.g. 🔥, U+1F525), `[non_bmp].clipboard_apps` lists the focused application's window class, and that application is focused
+- **When** the key is pressed and released
+- **Then** the emoji appears intact at the cursor (surrogate pairs preserved), delivered via clipboard paste rather than the keysym path
+
+### 9.2 Emoji into a non-whitelisted or non-AWT window uses the keysym path
+- **Given** a non-BMP glyph is bound and the focused window's class is not listed in `[non_bmp].clipboard_apps` (e.g. a terminal or browser)
+- **When** the key is pressed and released
+- **Then** the glyph is delivered via the keysym path, with no clipboard paste and no synthetic Ctrl+V sent to that window
+
+### 9.3 BMP glyphs never use the clipboard
+- **Given** a BMP glyph is bound (e.g. ✅, U+2705), even while a whitelisted Java/AWT app is focused
+- **When** the key is pressed and released
+- **Then** it is typed via the keysym path and the system clipboard is left untouched
+
+### 9.4 The prior clipboard is restored after an emoji paste
+- **Given** the system clipboard holds some content and a non-BMP glyph is pasted into a whitelisted Java/AWT app
+- **When** the paste completes
+- **Then** the clipboard is restored to its prior content (best-effort)
+
+### 9.5 Clipboard routing is off when unconfigured
+- **Given** `[non_bmp].clipboard_apps` is empty or unset
+- **When** any non-BMP glyph is pressed in any window
+- **Then** it always takes the keysym path and no clipboard-owner activity occurs
+
+### 9.6 Focus is evaluated at the moment of delivery
+- **Given** a non-BMP glyph is pressed while a whitelisted Java/AWT app is focused
+- **When** the glyph is delivered (on key release, after any pending keymap remap has completed)
+- **Then** the clipboard-vs-keysym decision reflects the window focused at delivery time, not the window focused at an earlier layer switch

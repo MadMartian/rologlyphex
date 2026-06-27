@@ -155,3 +155,27 @@ All fields are optional; CLI flags override file values. Parsed into `settings::
 | `nav_settle_ms` | `uint64` | no | Navigation debounce (debounce mode only): milliseconds of input quiet after the knob settles on a layer before the typist remaps for it. Lower = quicker remap but risks remapping mid-spin; higher = longer window where typing right after stopping waits. Default `160`. |
 | `remap_mode` | `"lazy" \| "debounce"` | no | When the typist rebuilds the keymap for a newly-entered layer. `lazy`: on the first keypress in the layer, showing a "Please Wait" overlay during the (slow) remap. `debounce`: in the idle gap after the knob settles (no indicator). Default `lazy`. |
 | `verbose` | `bool` | no | Enable debug logging. Default `false`. |
+| `non_bmp` | `NonBmp` | no | Non-BMP (emoji) clipboard-routing table. See below. Omit to disable the clipboard path entirely. |
+
+### `[non_bmp]`
+
+Controls how non-BMP glyphs (emoji, U+10000+) are delivered to Java/AWT applications, whose
+keysym path truncates them (see TECH.md → *Non-BMP clipboard routing*). When omitted, non-BMP
+glyphs always take the keysym path (wrong in AWT, correct everywhere else).
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `clipboard_apps` | `array<string>` | no | `WM_CLASS` globs whose focused windows receive non-BMP glyphs via clipboard paste instead of the keysym path. Empty/unset disables the clipboard path. Matching is an **anchored glob** — the pattern must match the whole `WM_CLASS`, with `*` the only wildcard (any run, including empty) and every other character literal — tested against either `res_name` or `res_class`. So `jetbrains-*` matches `jetbrains-pycharm` but not `not-jetbrains-foo`; `SmartGit` matches only `SmartGit`. |
+
+**Example:**
+```toml
+[non_bmp]
+# All JetBrains IDEs share the jetbrains-* WM_CLASS, so one glob covers them.
+clipboard_apps = ["jetbrains-*"]
+```
+
+> **Clipboard contamination**: while delivering an emoji this path briefly takes over the
+> system `CLIPBOARD` and then restores the prior contents. The restore is best-effort — a
+> clipboard manager may still record the transient emoji in its history, and copying something
+> else during the (sub-second) paste wins. Users who watch their clipboard will see it change
+> momentarily. This is inherent to clipboard-based delivery, not a bug.

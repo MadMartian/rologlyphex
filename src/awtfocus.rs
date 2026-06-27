@@ -1,4 +1,4 @@
-// Focus-gated AWT detection for the non-BMP clipboard path (see sdd/PLAN.non-BMP.md).
+// Focus-gated AWT detection for the non-BMP clipboard path (see sdd/TECH.md).
 //
 // Java/AWT (notably JetBrains IDEs) truncates non-BMP keysyms via `(int)(keysym & 0xFFFF)`,
 // so emoji typed through the XTest/keysym path render as wrong CJK glyphs there — but the
