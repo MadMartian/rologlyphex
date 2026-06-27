@@ -22,6 +22,18 @@ pub struct AppSettings {
     /// keypress, with a "Please Wait" overlay) or "debounce" (after the knob settles, no
     /// indicator). Default "lazy".
     pub remap_mode: Option<String>,
+    /// Non-BMP (emoji, U+10000+) clipboard-routing settings. See sdd/PLAN.non-BMP.md.
+    pub non_bmp: Option<NonBmpSettings>,
+}
+
+/// `[non_bmp]` config table.
+#[derive(Deserialize, Default, Clone)]
+pub struct NonBmpSettings {
+    /// WM_CLASS globs whose focused windows receive non-BMP glyphs via the clipboard paste
+    /// path instead of the keysym path, which Java/AWT truncates. Matched (anchored glob,
+    /// not regex; `*` wildcard) against either res_name or res_class. Empty/unset disables
+    /// the clipboard path entirely. Example: `["jetbrains-*"]`.
+    pub clipboard_apps: Option<Vec<String>>,
 }
 
 impl AppSettings {
@@ -66,6 +78,11 @@ impl AppSettings {
         Self::config_dir().join("layers.toml")
     }
 
+    #[cfg(test)]
+    fn parse(s: &str) -> Result<Self, toml::de::Error> {
+        toml::from_str::<Self>(s)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn merge_cli(
         &mut self,
@@ -96,4 +113,26 @@ impl AppSettings {
         }
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppSettings;
+
+    #[test]
+    fn non_bmp_table_deserializes() {
+        let s = AppSettings::parse(
+            "corner = \"bottom-left\"\n\n[non_bmp]\nclipboard_apps = [\"jetbrains-*\"]\n",
+        )
+        .expect("valid config should parse");
+        let apps = s.non_bmp.and_then(|n| n.clipboard_apps).unwrap_or_default();
+        assert_eq!(apps, vec!["jetbrains-*".to_string()]);
+    }
+
+    #[test]
+    fn unquoted_corner_value_is_invalid_toml() {
+        // Confirms the deployed-config bug: a bare (unquoted) value fails the whole parse,
+        // which would silently drop EVERY setting (including [non_bmp]) to defaults.
+        assert!(AppSettings::parse("corner = bottom-left\n").is_err());
+    }
 }

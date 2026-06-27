@@ -1,5 +1,6 @@
 use x11::xlib;
 use x11::xtest;
+use x11::keysym;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ptr;
 use std::time::{Duration, Instant};
@@ -200,6 +201,11 @@ pub struct LayerTyper {
     display: *mut xlib::Display,
     /// logical key name -> its dedicated scratch keycode.
     index: HashMap<String, u8>,
+    /// 1×1 unmapped window that owns the CLIPBOARD selection during a non-BMP paste.
+    clip_window: xlib::Window,
+    clipboard: xlib::Atom,
+    utf8_string: xlib::Atom,
+    targets: xlib::Atom,
 }
 
 // SAFETY: owns a dedicated Xlib Display connection, used only by the key-grab thread.
@@ -227,8 +233,19 @@ impl LayerTyper {
             .zip(scratch.iter().copied())
             .collect();
 
+        // Hidden selection-owner window + interned atoms for the non-BMP clipboard path.
+        let (clip_window, clipboard, utf8_string, targets) = unsafe {
+            let root = xlib::XDefaultRootWindow(display);
+            (
+                xlib::XCreateSimpleWindow(display, root, 0, 0, 1, 1, 0, 0, 0),
+                xlib::XInternAtom(display, b"CLIPBOARD\0".as_ptr() as *const _, xlib::False),
+                xlib::XInternAtom(display, b"UTF8_STRING\0".as_ptr() as *const _, xlib::False),
+                xlib::XInternAtom(display, b"TARGETS\0".as_ptr() as *const _, xlib::False),
+            )
+        };
+
         debug_log!("[🐛DEBUG] LayerTyper: assigned {} scratch keycodes {:?}", index.len(), scratch);
-        Ok(LayerTyper { display, index })
+        Ok(LayerTyper { display, index, clip_window, clipboard, utf8_string, targets })
     }
 
     /// Find `needed` usable scratch keycodes, preferring free (all-NoSymbol) ones, then
@@ -344,6 +361,131 @@ impl LayerTyper {
                 xtest::XTestFakeKeyEvent(self.display, kc as u32, xlib::False, 0);
                 xlib::XFlush(self.display);
             }
+        }
+    }
+
+    /// Deliver `text` via the X11 CLIPBOARD selection: claim ownership, synthesize Ctrl+V,
+    /// and serve the SelectionRequest protocol. Used for non-BMP glyphs when an AWT window is
+    /// focused (the keysym path truncates them there; see sdd/PLAN.non-BMP.md).
+    ///
+    /// Release is **event-driven** — ownership is held until the consumer's data request
+    /// (UTF8_STRING/STRING) is actually answered, then a short grace window (a slow JVM
+    /// re-polls TARGETS repeatedly), then released. This is the ANTI-PATTERNS #24 fix: a fixed
+    /// timeout dropped ownership before the asynchronous consumer requested the data. The
+    /// hard cap is only a backstop for a consumer that never requests at all.
+    ///
+    /// Caveat: this clobbers the user's CLIPBOARD (no save/restore yet — see the plan).
+    pub fn paste_via_clipboard(&self, text: &str) {
+        let text_bytes = text.as_bytes();
+        const GRACE: Duration = Duration::from_millis(250);
+        const HARD_CAP: Duration = Duration::from_millis(1500);
+        unsafe {
+            // Drain stale events on our connection.
+            while xlib::XPending(self.display) > 0 {
+                let mut discard: xlib::XEvent = std::mem::zeroed();
+                xlib::XNextEvent(self.display, &mut discard);
+            }
+
+            // Claim CLIPBOARD ownership.
+            xlib::XSetSelectionOwner(self.display, self.clipboard, self.clip_window, xlib::CurrentTime);
+            xlib::XFlush(self.display);
+            if xlib::XGetSelectionOwner(self.display, self.clipboard) != self.clip_window {
+                eprintln!("[🐛DEBUG] clipboard: failed to claim CLIPBOARD ownership");
+                return;
+            }
+
+            // Synthesize Ctrl+V into the focused window.
+            let ctrl = xlib::XKeysymToKeycode(self.display, keysym::XK_Control_L as u64);
+            let v = xlib::XKeysymToKeycode(self.display, keysym::XK_v as u64);
+            xtest::XTestFakeKeyEvent(self.display, ctrl as u32, xlib::True, 0);
+            xtest::XTestFakeKeyEvent(self.display, v as u32, xlib::True, 0);
+            xtest::XTestFakeKeyEvent(self.display, v as u32, xlib::False, 0);
+            xtest::XTestFakeKeyEvent(self.display, ctrl as u32, xlib::False, 0);
+            xlib::XFlush(self.display);
+
+            // Serve requests until the data request is answered + grace, or the backstop fires.
+            let start = Instant::now();
+            let mut served_at: Option<Instant> = None;
+            loop {
+                if let Some(t) = served_at {
+                    if t.elapsed() >= GRACE {
+                        break;
+                    }
+                }
+                if start.elapsed() >= HARD_CAP {
+                    if served_at.is_none() {
+                        eprintln!("[🐛DEBUG] clipboard: data never requested before backstop");
+                    }
+                    break;
+                }
+                if xlib::XPending(self.display) > 0 {
+                    let mut ev: xlib::XEvent = std::mem::zeroed();
+                    xlib::XNextEvent(self.display, &mut ev);
+                    if ev.type_ == xlib::SelectionRequest {
+                        let req = ev.selection_request;
+                        let is_data = req.target != self.targets;
+                        self.handle_selection_request(&req, text_bytes);
+                        if is_data {
+                            served_at = Some(Instant::now()); // (re)start grace on each data serve
+                        }
+                    }
+                } else {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+
+            // Release ownership. (Save/restore of the prior clipboard is future work.)
+            xlib::XSetSelectionOwner(self.display, self.clipboard, 0, xlib::CurrentTime);
+            xlib::XFlush(self.display);
+        }
+    }
+
+    /// Answer one SelectionRequest: TARGETS -> the formats we serve; UTF8_STRING/STRING ->
+    /// the bytes; anything else -> refusal (property = None). Also honors the obsolete
+    /// `property == None` requestor convention.
+    fn handle_selection_request(&self, req: &xlib::XSelectionRequestEvent, text_bytes: &[u8]) {
+        let property = if req.property == 0 { req.target } else { req.property };
+        unsafe {
+            if req.target == self.targets {
+                let supported = [self.utf8_string, xlib::XA_STRING, self.targets];
+                xlib::XChangeProperty(
+                    self.display, req.requestor, property,
+                    xlib::XA_ATOM, 32, xlib::PropModeReplace,
+                    supported.as_ptr() as *const u8, supported.len() as i32,
+                );
+            } else if req.target == self.utf8_string || req.target == xlib::XA_STRING {
+                xlib::XChangeProperty(
+                    self.display, req.requestor, property,
+                    req.target, 8, xlib::PropModeReplace,
+                    text_bytes.as_ptr(), text_bytes.len() as i32,
+                );
+            } else {
+                let mut refuse: xlib::XSelectionEvent = std::mem::zeroed();
+                refuse.type_ = xlib::SelectionNotify;
+                refuse.send_event = xlib::True;
+                refuse.display = self.display;
+                refuse.requestor = req.requestor;
+                refuse.selection = req.selection;
+                refuse.target = req.target;
+                refuse.property = 0; // None = refusal
+                refuse.time = req.time;
+                xlib::XSendEvent(self.display, req.requestor, xlib::False, 0,
+                    &mut refuse as *mut _ as *mut xlib::XEvent);
+                xlib::XFlush(self.display);
+                return;
+            }
+            let mut notify: xlib::XSelectionEvent = std::mem::zeroed();
+            notify.type_ = xlib::SelectionNotify;
+            notify.send_event = xlib::True;
+            notify.display = self.display;
+            notify.requestor = req.requestor;
+            notify.selection = req.selection;
+            notify.target = req.target;
+            notify.property = property;
+            notify.time = req.time;
+            xlib::XSendEvent(self.display, req.requestor, xlib::False, 0,
+                &mut notify as *mut _ as *mut xlib::XEvent);
+            xlib::XFlush(self.display);
         }
     }
 }

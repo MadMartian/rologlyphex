@@ -23,7 +23,9 @@ discarded and a wrong (usually CJK) BMP glyph is produced. This is specific to t
 
 ## Verified premise
 
-On 2026-06-26 the receiving side was tested directly under the **JetBrains Runtime**
+Two tests, receiving side then delivery side, confirm the approach end-to-end.
+
+**Receiving side (2026-06-26)** — tested under the **JetBrains Runtime**
 (`idea-IU-233/jbr`, JBR 17), the exact runtime the IDEs use:
 
 - `Toolkit.getSystemClipboard().getData(stringFlavor)` returned `😀🎉✓`
@@ -31,9 +33,24 @@ On 2026-06-26 the receiving side was tested directly under the **JetBrains Runti
 - A **real `Ctrl+V` paste** into a focused `JTextField` produced the same codepoints
   with no truncation, confirmed both programmatically and visually on-screen.
 
+**Delivery side (2026-06-27)** — tested against a *real running JetBrains IDE*
+(a RustRover instance editing this very file), with a standalone C probe that mirrors
+the salvaged selection-owner code below but applies the #24 fix (event-driven release):
+
+- The probe claimed `CLIPBOARD` with `U+1F600 U+1F389 U+2713`, synthesized `Ctrl+V`,
+  and served the `SelectionRequest` protocol. RustRover's JVM polled `TARGETS` ~25 times
+  and requested `UTF8_STRING` repeatedly — the exact multi-request, consumer-driven
+  behavior the old fixed-timeout release used to lose.
+- Releasing ownership **only after the data request was answered, plus a 1.5 s grace**
+  survived all of that polling with no premature release. The pasted glyphs landed in the
+  editor and, after autosave, were verified **on disk** as `U+1F600 U+1F389 U+2713` —
+  intact, no CJK truncation.
+
 **Conclusion**: AWT's *clipboard* path is a separate code route that handles non-BMP
-correctly. The keysym truncation does not apply to pasted text. The receiving side is
-therefore not a blocker — the open problem is purely **delivery**.
+correctly, and the focus-gated selection-owner delivery works against a real IDE consumer
+once release is event-driven rather than timed. The receiving side was never the blocker,
+and the delivery race (#24) now has a demonstrated fix — what remains is porting it into
+the daemon and adding the focus gate.
 
 ## Previously attempted
 
@@ -86,13 +103,15 @@ motivated it.
 
 ## Recommendation
 
-Pursue **Approach 1**. The verified premise removes the receiving-side risk, and the
-focus gate neutralizes the terminal failure (#4) by construction. Sequence the work so
-the two hard sub-problems are de-risked first:
+Pursue **Approach 1**. The verified premise removes the receiving-side risk *and* the
+delivery-side risk (the #24 release race now has a probe-confirmed fix), and the focus
+gate neutralizes the terminal failure (#4) by construction. Remaining work, in order:
 
 1. **AWT focus detection** — prove a reliable, fast classifier before any clipboard code.
-2. **Release timing** — replace the timed release with an event-driven one and confirm
-   the #24 race is gone under a slow consumer (JVM warmup is the worst case).
+2. **Release timing** — *validated by the delivery probe* (2026-06-27): event-driven
+   release (serve until the data request is answered, then a grace window) beat a real
+   JVM consumer's repeated polling. Port that serve/release loop into the daemon,
+   replacing the salvaged code's timed `deadline`; no further timeout experimentation.
 3. **Clipboard save/restore** — add last, with a grace window; fall back to Approach 2's
    retain-ownership behavior if restore proves unreliable.
 

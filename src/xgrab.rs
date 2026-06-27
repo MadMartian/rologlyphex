@@ -12,6 +12,7 @@
 // This thread owns its own Xlib Display and XTyper, matching the daemon's one-Display-per-
 // thread model (Xlib is not thread-safe across shared connections; see xtype.rs).
 //
+use crate::awtfocus::AwtDetector;
 use crate::debug_log;
 use crate::layers::LayersConfig;
 use crate::xerror;
@@ -65,6 +66,7 @@ pub fn run(
     settle_ms: i32,
     mode: RemapMode,
     please_wait: Arc<AtomicBool>,
+    awt_classes: Vec<String>,
 ) -> Result<(), String> {
     let display = unsafe { xlib::XOpenDisplay(ptr::null()) };
     if display.is_null() {
@@ -122,6 +124,13 @@ pub fn run(
     let exclude: HashSet<u8> = actions.keys().copied().collect();
     let logical_keys: Vec<String> = cfg.phys_to_logical.values().cloned().collect();
     let typer = LayerTyper::open(&logical_keys, &exclude)?;
+
+    // Non-BMP clipboard routing: classify the focused window against the WM_CLASS whitelist.
+    // The check is sampled per keystroke at delivery time (below), not cached at a layer
+    // boundary — focus can drift during the lazy keymap remap (see sdd/PLAN.non-BMP.md).
+    let awt = AwtDetector::new(display, awt_classes);
+    debug_log!("[🐛DEBUG] key-grab: non-BMP clipboard path {}",
+        if awt.is_enabled() { "enabled (AWT WM_CLASS whitelist set)" } else { "disabled (no awt_clipboard_classes)" });
 
     // Layer ring. The grab thread owns the index. On each knob step it only publishes the
     // active layer name (instant — the overlay tracks the knob in real time) and flags that a
@@ -191,12 +200,25 @@ pub fn run(
                         }
                         pending_remap = false;
                     }
-                    if let Some(ch) = cfg.glyph_for(layer, logical) {
-                        debug_log!("[🐛DEBUG] {} -> '{}' (layer {})", logical, ch, layer);
-                    } else {
-                        debug_log!("[🐛DEBUG] {} is unbound in layer {}", logical, layer);
+                    // Route non-BMP glyphs through the clipboard ONLY when an AWT window is
+                    // focused (its keysym path truncates them); everything else — all BMP
+                    // glyphs, and non-BMP into non-AWT apps — takes the working keysym path.
+                    // Focus is sampled HERE, at delivery, after the remap above has settled.
+                    match cfg.glyph_for(layer, logical) {
+                        Some(ch) if (ch as u32) > 0xFFFF && awt.focused_is_awt(display) => {
+                            debug_log!("[🐛DEBUG] {} -> '{}' (U+{:04X}) non-BMP into AWT: clipboard paste",
+                                logical, ch, ch as u32);
+                            typer.paste_via_clipboard(&ch.to_string());
+                        }
+                        Some(ch) => {
+                            debug_log!("[🐛DEBUG] {} -> '{}' (layer {})", logical, ch, layer);
+                            typer.press(logical);
+                        }
+                        None => {
+                            debug_log!("[🐛DEBUG] {} is unbound in layer {}", logical, layer);
+                            typer.press(logical);
+                        }
                     }
-                    typer.press(logical);
                 }
                 _ => {}
             }

@@ -1,3 +1,4 @@
+mod awtfocus;
 mod client;
 mod config;
 mod layers;
@@ -348,8 +349,11 @@ fn run_daemon(settings: Arc<AppSettings>, layers_path: String) {
         }
     };
     let please_wait_grab = please_wait.clone();
+    let awt_classes = settings.non_bmp.as_ref()
+        .and_then(|n| n.clipboard_apps.clone())
+        .unwrap_or_default();
     thread::spawn(move || {
-        if let Err(e) = xgrab::run(cfg_grab, current_layout_grab, nav_settle_ms, remap_mode, please_wait_grab) {
+        if let Err(e) = xgrab::run(cfg_grab, current_layout_grab, nav_settle_ms, remap_mode, please_wait_grab, awt_classes) {
             eprintln!("Key-grab thread error: {}", e);
         }
     });
