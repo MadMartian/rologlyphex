@@ -37,14 +37,17 @@ The GTK main thread polls a `Mutex<String>` every 100ms for layout changes (`gli
 The XTest/keysym approach encodes non-BMP characters (U+10000+) as keysyms `0x01000000 + codepoint`. Java's AWT/Swing truncates these via `(int)(keysym & 0xFFFF)`, producing wrong CJK glyphs instead of the intended emoji. BMP characters and all other tested applications (terminal emulators, browsers, GTK apps) are unaffected.
 
 **Approaches investigated and rejected**:
-- **Clipboard paste + Ctrl+V** (implemented twice, reverted twice): Race conditions between clipboard ownership release and application data request made it unreliable in practice. Also destroys the user's clipboard, and Ctrl+V is intercepted by terminal emulators as a literal control character.
+- **Clipboard paste + Ctrl+V** (implemented twice, reverted twice): Failed for two independent reasons. (1) **Ownership-release race**: the implementation claimed `CLIPBOARD`, synthesized Ctrl+V, served the incoming `SelectionRequest`, then released ownership (`XSetSelectionOwner(.., 0)`) on a short timeout. X11 paste is asynchronous — the consumer requests the selection data *after* it processes the synthetic Ctrl+V, which can arrive after the timeout has already fired and dropped ownership, so the paste intermittently delivered nothing. (2) **Terminal Ctrl+V**: terminal emulators treat Ctrl+V as literal-insert, not paste (see ANTI-PATTERNS #4). It also clobbers the user's clipboard. The salvageable parts of the shelved implementation (dispatch gate + hardened `SelectionRequest` serving) are embedded in `sdd/PLAN.non-BMP.md`.
 - **Input method CommitText via D-Bus**: Input method contexts require `FocusIn` from the application side — external push-based injection hangs indefinitely or is rejected. Input methods are pull-based by design.
 - **XSendEvent ClientMessage**: Most applications ignore synthetic XSendEvent for security reasons.
-- **XDG portal clipboard**: Portal support for Java/AWT applications is unverified; likely not available.
+- **XDG portal clipboard**: Portal support for Java/AWT applications is unverified (never tested); likely not available.
+
+**Verified**: The truncation is specific to AWT's *keysym* decode path. AWT accepts a non-BMP **paste** correctly (a separate code path delivering UTF-8 selection bytes) — confirmed under the JetBrains Runtime: `😀🎉✓` pasted into a Swing field intact, surrogate pairs preserved. A targeted, focus-gated clipboard approach is therefore tracked in `sdd/PLAN.non-BMP.md`; the open problem is delivery (the #24 ownership-release race), not AWT.
 
 **Mitigation options**:
 - Use the application's built-in emoji picker (Edit → Emoji & Symbols or OS-level shortcut) for emoji in Java/AWT applications
 - Assign only BMP characters to macropad layouts used while running Java/AWT applications
+- Save and restore the user's prior clipboard contents around a paste to avoid clobbering it (itself racy — the restore can land before the consumer reads the injected value)
 - Revisit if the Java/AWT keysym handling is fixed upstream
 
 ## E. Caps Lock active causes wrong character output (XKB/core mapping mismatch)

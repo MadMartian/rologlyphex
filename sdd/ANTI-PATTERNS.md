@@ -27,6 +27,21 @@ Coding, functional, and behavioural anti-patterns encountered during development
 | 21 | `XChangeKeyboardMapping` per keycode storms `MappingNotify` and brings the whole desktop UI to its knees |
 | 22 | An `XGrabKey` active grab swallows `XTest` injection done on key press |
 | 23 | Signaling a UI progress indicator *during* a blocking keymap remap never renders it |
+| 24 | Releasing X11 selection ownership on a timeout races the asynchronous paste consumer |
+
+## 24. Releasing X11 selection ownership on a timeout races the asynchronous paste consumer
+
+**Symptom**: A clipboard-paste injection path (claim `CLIPBOARD`, synthesize Ctrl+V, serve the `SelectionRequest`, then release ownership) delivered the pasted text only intermittently. The same code path worked in some applications and silently dropped the paste in others, with no error — the target field simply stayed empty.
+
+**What was tried**:
+- Serving the `SelectionRequest` in a loop with a timeout, then calling `XSetSelectionOwner(display, CLIPBOARD, None, CurrentTime)` to relinquish ownership so the user's real clipboard wasn't permanently hijacked.
+- Hardening the serve loop (multi-request TARGETS→UTF8_STRING protocol, stale-event draining, obsolete property=None protocol) — improved robustness of *serving* a request but did not fix the *intermittent no-paste*.
+
+**Root cause**: X11 paste is asynchronous and consumer-driven. Synthesizing Ctrl+V only *signals* the focused application to paste; the application then asks the selection owner for the data on its own schedule — often several milliseconds later, and later still for heavyweight toolkits (JVM warmup, event-queue depth). If the owner releases the selection (or the serve loop times out) before that request arrives, the request finds no owner — or finds ownership already transferred back — and the paste yields nothing. There is no synchronous acknowledgement that the consumer has finished reading; a fixed timeout is a guess, and the race is invisible because nothing errors.
+
+**Resolution**: Abandoned the timeout-then-release design for non-BMP input (the approach had a second, independent blocker in terminals — see #4). No correct fixed timeout exists; the owner cannot know the consumer is done without an explicit protocol the consumer doesn't provide. Shelved code embedded in `sdd/PLAN.non-BMP.md`.
+
+**Lesson**: When you own an X11 selection to feed a synthetic paste, you cannot safely release ownership on a timer — the consumer reads the data asynchronously, after it processes the paste keystroke, with no signal back to you when it's finished. Either retain ownership indefinitely (and accept clobbering the user's clipboard) or don't use the selection mechanism for push-style injection at all. A "paste then release after N ms" design is a race with no correct N.
 
 ## 22. An `XGrabKey` active grab swallows `XTest` injection done on key press
 
@@ -155,7 +170,7 @@ Net: idle navigation = 0 remaps; worst case = 1 `MappingNotify` the first time y
 
 **Root cause**: Terminal emulators interpret Ctrl+V as "insert next character literally" (a readline/VT convention), not as "paste from clipboard." This is fundamental to how terminals work and cannot be detected or worked around at the X11 level.
 
-**Resolution**: Reverted the non-BMP clipboard gate. All characters now use the keysym remap path. Clipboard code was eventually removed entirely (shelved in git history; see `sdd/ISSUES.md` entry D for full investigation notes).
+**Resolution**: Reverted the non-BMP clipboard gate. All characters now use the keysym remap path. Clipboard code was eventually removed entirely from the working tree; the salvageable code is embedded in `sdd/PLAN.non-BMP.md` (see `sdd/ISSUES.md` entry D for the full investigation). The terminal problem is one of two independent failure modes — the other is the ownership-release race in #24.
 
 **Lesson**: Ctrl+V is not a universal paste operation. Before building a clipboard-based input mechanism, verify it works in ALL target application types (GUI editors, terminals, IDEs, browsers). Test terminals early — they are the most likely to break.
 
