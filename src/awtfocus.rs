@@ -60,6 +60,7 @@ pub struct AwtDetector {
 
 impl AwtDetector {
     pub fn new(display: *mut xlib::Display, patterns: Vec<String>) -> Self {
+        // SAFETY: `display` is a live connection; the name is a static NUL-terminated literal.
         let net_active_window = unsafe {
             xlib::XInternAtom(display, b"_NET_ACTIVE_WINDOW\0".as_ptr() as *const _, xlib::False)
         };
@@ -87,13 +88,15 @@ impl AwtDetector {
     /// The managed top-level window: prefer `_NET_ACTIVE_WINDOW` (set by the WM on the
     /// top-level, which is where WM_CLASS lives); fall back to `XGetInputFocus`.
     fn focused_window(&self, display: *mut xlib::Display) -> xlib::Window {
-        let root = unsafe { xlib::XDefaultRootWindow(display) };
         let mut actual_type: xlib::Atom = 0;
         let mut actual_format: i32 = 0;
         let mut nitems: u64 = 0;
         let mut bytes_after: u64 = 0;
         let mut prop: *mut u8 = ptr::null_mut();
+        // SAFETY: `display` is a live connection; the out-params are all valid locals.
+        // XGetWindowProperty sets `prop` to a server-allocated buffer (freed below) or null.
         let status = unsafe {
+            let root = xlib::XDefaultRootWindow(display);
             xlib::XGetWindowProperty(
                 display, root, self.net_active_window,
                 0, 1, xlib::False, xlib::XA_WINDOW,
@@ -101,17 +104,22 @@ impl AwtDetector {
             )
         };
         if status == xlib::Success as i32 && !prop.is_null() && nitems >= 1 {
+            // SAFETY: a successful XA_WINDOW read with nitems >= 1 means `prop` points to at
+            // least one Window; we read exactly one, then free the buffer Xlib allocated.
             let w = unsafe { *(prop as *const xlib::Window) };
             unsafe { xlib::XFree(prop as *mut _) };
             if w != 0 {
                 return w;
             }
         } else if !prop.is_null() {
+            // SAFETY: non-null buffer from XGetWindowProperty must be freed even on a partial
+            // or wrong-type read.
             unsafe { xlib::XFree(prop as *mut _) };
         }
 
         let mut focus: xlib::Window = 0;
         let mut revert: i32 = 0;
+        // SAFETY: `display` valid; both out-params are valid locals fully written by the call.
         unsafe { xlib::XGetInputFocus(display, &mut focus, &mut revert) };
         focus
     }
@@ -121,11 +129,18 @@ impl AwtDetector {
             res_name: ptr::null_mut(),
             res_class: ptr::null_mut(),
         };
+        // SAFETY: `display` valid; `hint` is a valid local. On success XGetClassHint fills
+        // res_name/res_class with server-allocated C strings (freed below); on failure (0) it
+        // leaves them null and we return without touching them.
         if unsafe { xlib::XGetClassHint(display, win, &mut hint) } == 0 {
             return false;
         }
+        // SAFETY: both pointers are either null (handled by cstr_opt) or NUL-terminated C
+        // strings owned by Xlib and valid until we XFree them just below.
         let res_name = unsafe { cstr_opt(hint.res_name) };
         let res_class = unsafe { cstr_opt(hint.res_class) };
+        // SAFETY: free the (possibly null) buffers XGetClassHint allocated; XFree(null) on a
+        // guarded non-null pointer only.
         unsafe {
             if !hint.res_name.is_null() {
                 xlib::XFree(hint.res_name as *mut _);
@@ -142,6 +157,10 @@ impl AwtDetector {
 }
 
 /// Copy a (possibly null) C string from Xlib into an owned String.
+///
+/// # Safety
+/// `p` must be either null or a valid pointer to a NUL-terminated string that stays valid
+/// for the duration of the call (here: a WM_CLASS buffer owned by Xlib, read before XFree).
 unsafe fn cstr_opt(p: *mut std::os::raw::c_char) -> Option<String> {
     if p.is_null() {
         None
