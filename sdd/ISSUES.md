@@ -5,7 +5,6 @@
 | A | Keycode pool depletion across restarts | Low (fixed with LRU eviction) |
 | E | Caps Lock active causes wrong character output (XKB/core mapping mismatch) | Medium |
 | B | 100ms polling latency | Low |
-| D | Non-BMP characters (emoji) produce wrong output in Java/AWT-based applications | Medium |
 | H | Root-context socket discovery is vulnerable to TOCTOU via /run/user/* scan | Medium |
 | I | Ambiguous-width Unicode glyphs (e.g. ℃) misrender cursor position in terminal emulators | Closed |
 
@@ -29,23 +28,6 @@ With ~50 free keycodes and ~15 characters per session, exhaustion would require 
 The GTK main thread polls a `Mutex<String>` every 100ms for layout changes (`glib::timeout_add_local`). This introduces up to 100ms latency between the grab thread publishing a layer change (`Mutex<String>`) and the overlay appearing. It also keeps the main loop doing work every 100ms even when idle.
 
 **Mitigation**: Replace polling with an event-driven approach using `glib::MainContext::channel()`, which would deliver layout changes to the GTK thread with zero latency and zero idle overhead.
-
-## D. Non-BMP characters (emoji) produce wrong output in Java/AWT-based applications
-
-**Severity**: Medium (user-visible, affects emoji layouts in Java/AWT-based IDEs and apps)
-
-The XTest/keysym approach encodes non-BMP characters (U+10000+) as keysyms `0x01000000 + codepoint`. Java's AWT/Swing truncates these via `(int)(keysym & 0xFFFF)`, producing wrong CJK glyphs instead of the intended emoji. BMP characters and all other tested applications (terminal emulators, browsers, GTK apps) are unaffected.
-
-**Approaches investigated and rejected**:
-- **Clipboard paste + Ctrl+V** (implemented twice, reverted twice): Race conditions between clipboard ownership release and application data request made it unreliable in practice. Also destroys the user's clipboard, and Ctrl+V is intercepted by terminal emulators as a literal control character.
-- **Input method CommitText via D-Bus**: Input method contexts require `FocusIn` from the application side — external push-based injection hangs indefinitely or is rejected. Input methods are pull-based by design.
-- **XSendEvent ClientMessage**: Most applications ignore synthetic XSendEvent for security reasons.
-- **XDG portal clipboard**: Portal support for Java/AWT applications is unverified; likely not available.
-
-**Mitigation options**:
-- Use the application's built-in emoji picker (Edit → Emoji & Symbols or OS-level shortcut) for emoji in Java/AWT applications
-- Assign only BMP characters to macropad layouts used while running Java/AWT applications
-- Revisit if the Java/AWT keysym handling is fixed upstream
 
 ## E. Caps Lock active causes wrong character output (XKB/core mapping mismatch)
 

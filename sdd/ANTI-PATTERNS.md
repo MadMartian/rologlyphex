@@ -27,6 +27,21 @@ Coding, functional, and behavioural anti-patterns encountered during development
 | 21 | `XChangeKeyboardMapping` per keycode storms `MappingNotify` and brings the whole desktop UI to its knees |
 | 22 | An `XGrabKey` active grab swallows `XTest` injection done on key press |
 | 23 | Signaling a UI progress indicator *during* a blocking keymap remap never renders it |
+| 24 | Releasing X11 selection ownership on a timeout races the asynchronous paste consumer |
+
+## 24. Releasing X11 selection ownership on a timeout races the asynchronous paste consumer
+
+**Symptom**: A clipboard-paste injection path (claim `CLIPBOARD`, synthesize Ctrl+V, serve the `SelectionRequest`, then release ownership) delivered the pasted text only intermittently. The same code path worked in some applications and silently dropped the paste in others, with no error — the target field simply stayed empty.
+
+**What was tried**:
+- Serving the `SelectionRequest` in a loop with a timeout, then calling `XSetSelectionOwner(display, CLIPBOARD, None, CurrentTime)` to relinquish ownership so the user's real clipboard wasn't permanently hijacked.
+- Hardening the serve loop (multi-request TARGETS→UTF8_STRING protocol, stale-event draining, obsolete property=None protocol) — improved robustness of *serving* a request but did not fix the *intermittent no-paste*.
+
+**Root cause**: X11 paste is asynchronous and consumer-driven. Synthesizing Ctrl+V only *signals* the focused application to paste; the application then asks the selection owner for the data on its own schedule — often several milliseconds later, and later still for heavyweight toolkits (JVM warmup, event-queue depth). If the owner releases the selection (or the serve loop times out) before that request arrives, the request finds no owner — or finds ownership already transferred back — and the paste yields nothing. There is no synchronous acknowledgement that the consumer has finished reading; a fixed timeout is a guess, and the race is invisible because nothing errors.
+
+**Resolution**: Replaced the timer with an **event-driven** release, in `src/clipserve.rs`. Ownership is held until the consumer's *data* request (`UTF8_STRING`/`STRING`, as opposed to a `TARGETS` probe) is actually answered, then a short grace window covers re-polls; a hard cap remains only as a backstop for a consumer that never requests at all. The "move on" trigger is the observed request, not a guessed delay. Ownership lives in a dedicated, persistent clipboard-owner thread that keeps serving after the paste, which also lets it restore (and keep serving) the user's prior clipboard instead of dropping it.
+
+**Lesson**: When you own an X11 selection to feed a synthetic paste, you cannot release ownership on a timer — the consumer reads the data asynchronously, after it processes the paste keystroke, with no up-front signal of when it will. But you *can* release on the right event: serve until the consumer's non-`TARGETS` (data) request is answered — that is the real "done" signal — then hold a brief grace for re-polls, with a hard cap only as a backstop. Tie the lifecycle to observed events, not elapsed time. A "paste then release after N ms" design is a race with no correct N.
 
 ## 22. An `XGrabKey` active grab swallows `XTest` injection done on key press
 
@@ -155,7 +170,7 @@ Net: idle navigation = 0 remaps; worst case = 1 `MappingNotify` the first time y
 
 **Root cause**: Terminal emulators interpret Ctrl+V as "insert next character literally" (a readline/VT convention), not as "paste from clipboard." This is fundamental to how terminals work and cannot be detected or worked around at the X11 level.
 
-**Resolution**: Reverted the non-BMP clipboard gate. All characters now use the keysym remap path. Clipboard code was eventually removed entirely (shelved in git history; see `sdd/ISSUES.md` entry D for full investigation notes).
+**Resolution**: Scope the paste with a **focus gate** (`src/awtfocus.rs`): the clipboard path is used *only* when the focused window's `WM_CLASS` matches the `[non_bmp].clipboard_apps` whitelist (Java/AWT apps, which need it and treat Ctrl+V as paste). Terminals — and everything else — never receive a synthetic Ctrl+V; they stay on the keysym path. The original attempt failed because it pasted *globally*; scoping delivery to the apps that actually need it sidesteps the terminal convention by construction. (The other failure mode, the ownership-release race, is #24.)
 
 **Lesson**: Ctrl+V is not a universal paste operation. Before building a clipboard-based input mechanism, verify it works in ALL target application types (GUI editors, terminals, IDEs, browsers). Test terminals early — they are the most likely to break.
 

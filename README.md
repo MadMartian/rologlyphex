@@ -11,6 +11,7 @@ Named after Rolodex + glyphs.
 - **Layer overlay** — floating, click-through notification window shows the active deck and per-button glyphs as the knob cycles, with an app header (icon + title) that hugs the configured corner; recall on demand via `rologlyphex show`
 - **Self-contained input** — grabs the macropad function keys (F13–F24) directly at the X11 level, owns the layer ring, and types each layer's glyph itself. No keyd or other remapping daemon, and it runs as a normal user-session client (no root)
 - **Reliable Unicode input** — types into the focused X11 window via XTest + keyboard remapping (no xdotool, no compose-file fragility)
+- **Emoji in Java/AWT apps** — non-BMP glyphs that JetBrains IDEs would otherwise mangle are delivered by a focus-gated clipboard paste, with your prior clipboard saved and restored (opt-in via `[non_bmp].clipboard_apps`)
 - **Simple glyph map** — `layers.toml` maps friendly key aliases to glyphs per layer, with global key groups for the overlay (see [`sdd/SCHEMA.md`](sdd/SCHEMA.md))
 - **Configurable** — target monitor and overlay corner; lazy vs. debounce keymap-remap modes; persistent `~/.config/rologlyphex/config.toml`
 - **Agent-Ready Documentation** — Following Spec-Driven Development (SDD), all technical specs and behavioral contracts live in `sdd/`. `AGENTS.md` provides an entry point for AI contributors.
@@ -59,6 +60,10 @@ remap_mode = "lazy"       # "lazy" (default) or "debounce"
 nav_settle_ms = 160       # debounce mode only: ms of knob-quiet before remapping
 verbose = false
 # layers = "/path/to/layers.toml"   # default: ~/.config/rologlyphex/layers.toml
+
+[non_bmp]
+# WM_CLASS globs that should receive emoji via clipboard paste (see "Emoji in Java/AWT apps").
+clipboard_apps = ["jetbrains-*"]
 ```
 
 See [`sdd/SCHEMA.md`](sdd/SCHEMA.md) for every field.
@@ -96,7 +101,10 @@ rologlyphex type <char>   # type one character via the running daemon (manual / 
 rologlyphex show          # re-display the overlay in its current state
 ```
 
-> **Note**: emoji and other non-BMP characters (U+10000+) produce wrong output in Java/AWT-based applications due to keysym truncation. They work correctly in terminals, browsers, and GTK/Qt apps.
+> **Note**: emoji and other non-BMP characters (U+10000+) work everywhere via the keysym path
+> *except* Java/AWT apps (e.g. JetBrains IDEs), which truncate them. For those, configure
+> `[non_bmp].clipboard_apps` and they're delivered by clipboard paste instead — see
+> [Emoji in Java/AWT apps](#emoji-in-javaawt-apps).
 
 ## How it works
 
@@ -115,6 +123,19 @@ Only the active layer's ≤10 glyphs are mapped at once, onto a small set of scr
 - **lazy** (default) — remap on the first keypress in a layer, with a brief "Please Wait" overlay during the keymap rebuild.
 - **debounce** — remap in the idle gap (`nav_settle_ms`) after the knob settles, no indicator.
 
+### Emoji in Java/AWT apps
+
+Java/AWT applications (notably JetBrains IDEs) mangle non-BMP characters (emoji, U+10000+) typed via the normal keysym path — they truncate the keysym and render a wrong CJK glyph. Their *clipboard* path is unaffected, so rologlyphex delivers those glyphs by **paste** instead, but **only when a whitelisted Java/AWT window is focused**. List the apps by `WM_CLASS` glob:
+
+```toml
+[non_bmp]
+clipboard_apps = ["jetbrains-*"]   # one glob covers all JetBrains IDEs
+```
+
+When a non-BMP glyph is pressed and the focused window matches, rologlyphex saves your current clipboard, pastes the emoji (`Ctrl+V`), then restores what was there. Everything else — all BMP characters, and emoji in terminals/browsers/GTK apps — uses the keysym path untouched (a global clipboard paste would break terminals, where `Ctrl+V` means "insert literally").
+
+> **Heads-up — your clipboard flickers.** Delivering an emoji this way briefly replaces the system clipboard and then restores it. The restore is best-effort: a clipboard manager (e.g. KDE's klipper) may keep the emoji in its history, and if you copy something else during the sub-second paste, that wins. If you watch your clipboard, you'll see it change momentarily — this is inherent to clipboard-based input, not a bug. Leave `[non_bmp]` unset if you'd rather emoji never touch your clipboard (they'll just mis-render in JetBrains apps, as before).
+
 ## Architecture
 
 ```
@@ -127,6 +148,8 @@ src/
   wmprops.rs    X11 WM-property (EWMH) configuration via Xlib FFI
   xgrab.rs      XGrabKey F13–F24, layer ring, batch keymap remap, typing
   xtype.rs      LayerTyper (batch per-layer remap) + XTyper (per-glyph, manual type)
+  awtfocus.rs   focus-gated AWT detection (WM_CLASS glob whitelist) for emoji routing
+  clipserve.rs  persistent CLIPBOARD owner thread: paste + save/restore for emoji
   xerror.rs     non-fatal X error handlers (XSetErrorHandler / XSetIOErrorHandler)
   server.rs     Unix socket listener; dispatches type/show commands
   client.rs     Unix socket client for `rologlyphex type` and `rologlyphex show`
@@ -134,11 +157,12 @@ src/
   config.rs     overlay model structs (LayoutInfo/ButtonGroup/ButtonLegend)
 ```
 
-The daemon runs 3 concurrent activities, each with its own Xlib display:
+The daemon runs up to 4 concurrent activities, each with its own Xlib display:
 
 1. **GTK main loop** (main thread) — overlay + "Please Wait" windows, 100ms layer-change polling
 2. **Key-grab thread** — grabs F13–F24, runs the layer ring, remaps and types via XTest
 3. **Socket server** (thread) — accepts `type` and `show` commands
+4. **Clipboard-owner thread** — only when `[non_bmp].clipboard_apps` is set; owns/serves `CLIPBOARD` for emoji paste + restore
 
 See [`sdd/TECH.md`](sdd/TECH.md) for the full architecture.
 

@@ -6,6 +6,11 @@ rologlyphex owns the macropad experience end-to-end: it grabs the device functio
 the X11 level, runs the layer-ring state machine, and types each layer's glyph via XTest.
 keyd has been retired; rologlyphex owns input, layers, typing, and UI end-to-end.
 
+Most glyphs type via the keysym path. Non-BMP glyphs (emoji, U+10000+) destined for a focused
+Java/AWT window are the exception: AWT truncates non-BMP keysyms, so those are delivered via a
+focus-gated clipboard paste served by a dedicated owner thread (see *Non-BMP clipboard
+routing* below).
+
 ```
 ┌────────────────────┐  USB HID: F13–F18                ┌────────────────────────────────┐
 │      macropad      │ ───────────────────────────────> │                                │
@@ -84,6 +89,14 @@ The application crosses two FFI boundaries not covered by crate bindings:
    keymap; F19–F24 are absent from the keymap, so their keycodes are derived from the evdev
    codes (`KEY_F13`=183 … +8 XKB offset → 191–202). There is no keyd IPC anymore.
 
+3. **Non-BMP clipboard delivery** -- the clipboard-owner thread (`clipserve.rs`) owns the
+   `CLIPBOARD` selection on its own `Display` and speaks the X11 selection protocol directly:
+   `XSetSelectionOwner` to claim, `XConvertSelection` + `XGetWindowProperty` to fetch the prior
+   content, and `XChangeProperty` + `XSendEvent(SelectionNotify)` to answer `SelectionRequest`s
+   (TARGETS → `[UTF8_STRING, STRING, TARGETS]`; data → the bytes). Ownership release is tied to
+   the consumer's observed data request, never a timer (ANTI-PATTERNS #24). The focus classifier
+   (`awtfocus.rs`) reads `_NET_ACTIVE_WINDOW`/`XGetClassHint` on the grab `Display`.
+
 ## Module responsibilities
 
 | Module | Thread | Responsibility |
@@ -96,6 +109,8 @@ The application crosses two FFI boundaries not covered by crate bindings:
 | `wmprops.rs` | main | X11 window-manager property configuration (EWMH `_NET_WM_*`) via direct Xlib FFI — notification type, above/sticky/all-desktops, focus-less, and window move |
 | `xgrab.rs` | key-grab | `XGrabKey` F13–F24, poll-based event loop, layer-ring state machine, debounce/lazy remap scheduling, drives `LayerTyper`, publishes the active layer name and the "Please Wait" flag |
 | `xtype.rs` | key-grab + socket server | `LayerTyper` (batch per-layer keycode remap for the grab thread) and `XTyper` (per-glyph remap + LRU for the socket server's manual `type`); both with their own Xlib `Display` |
+| `awtfocus.rs` | key-grab | Focus-gated AWT detection: reads `_NET_ACTIVE_WINDOW` (managed top-level) + `XGetClassHint`, matches `WM_CLASS` against the `[non_bmp].clipboard_apps` anchored-glob whitelist. Sampled per keystroke at delivery to decide whether a non-BMP glyph routes to the clipboard |
+| `clipserve.rs` | clipboard-owner | Persistent `CLIPBOARD` owner with its own `Display`: on a paste it saves the prior selection, claims ownership, synthesizes Ctrl+V, serves the `SelectionRequest` protocol with **event-driven** release, then restores and keeps serving the saved content until `SelectionClear`. Receives glyphs from the grab thread over an `mpsc` channel |
 | `xerror.rs` | process-global | Installs non-fatal `XSetErrorHandler` / `XSetIOErrorHandler` so X protocol errors (e.g. `BadAccess` from `XGrabKey`) log and continue instead of `exit()`-ing |
 | `server.rs` | socket server | Unix socket listener; parses `type <char>` / `show`; delegates to `XTyper` or sets the show flag |
 | `client.rs` | (separate process) | Connects to the daemon socket, sends `type <char>\n` / `show\n`, exits |
@@ -104,7 +119,7 @@ The application crosses two FFI boundaries not covered by crate bindings:
 
 ## Concurrency model
 
-The daemon runs three concurrent activities, each with its **own** Xlib `Display` connection
+The daemon runs four concurrent activities, each with its **own** Xlib `Display` connection
 (Xlib is not thread-safe across a shared connection; no connection is shared between threads):
 
 1. **GTK main loop** (main thread) -- owns the overlay and "Please Wait" windows; polls a
@@ -116,10 +131,15 @@ The daemon runs three concurrent activities, each with its **own** Xlib `Display
    glyph via `LayerTyper` on key **release** (the active grab swallows injection on press).
 3. **Socket server** -- owns an `XTyper` `Display`; serves `rologlyphex type`/`show` for manual
    CLI use.
+4. **Clipboard-owner thread** -- spawned by the grab thread only when `[non_bmp].clipboard_apps`
+   is configured. Owns its own `Display` + a hidden window, and persistently owns/serves the
+   `CLIPBOARD` selection (see *Non-BMP clipboard routing*). Idle-blocks on its command channel
+   when it owns nothing; polls its X connection while serving.
 
 Shared state (all `Arc`): `Mutex<String>` active-layer name (grab → GTK); `AtomicBool`
 `please_wait` (grab → GTK); `AtomicBool` show-request (socket → GTK); `RwLock<HashMap<String,
-LayoutInfo>>` overlay model (built once from `LayersConfig`, read by the overlay).
+LayoutInfo>>` overlay model (built once from `LayersConfig`, read by the overlay). Cross-thread
+channel: `mpsc::Sender<String>` for glyphs (grab → clipboard-owner).
 
 ### Remap scheduling
 
@@ -131,5 +151,43 @@ session; see ANTI-PATTERNS #21). Two modes (`remap_mode`):
 - **lazy** (default) -- remap on the first keypress in a layer, showing the "Please Wait"
   overlay during the (briefly blocking) keymap rebuild.
 - **debounce** -- remap in the idle gap `nav_settle_ms` after the knob settles, no indicator.
+
+### Non-BMP clipboard routing
+
+Java/AWT (notably JetBrains IDEs) truncates non-BMP keysyms via `(int)(keysym & 0xFFFF)`, so
+emoji typed through the XTest/keysym path render as wrong CJK glyphs there. AWT's *clipboard*
+path is unaffected, so non-BMP glyphs are delivered by paste **only when a Java/AWT window is
+focused** — every other glyph, and non-BMP into any non-AWT app, takes the untouched keysym
+path.
+
+```
+key release (grab thread)
+      │  glyph is non-BMP (> U+FFFF)?
+      ▼
+ awtfocus: focused WM_CLASS ∈ [non_bmp].clipboard_apps ?   ── no ──► keysym path (press)
+      │ yes                                                              (terminals, GTK, …)
+      ▼  mpsc::Sender<String>
+ clipboard-owner thread (clipserve):
+   save prior CLIPBOARD → claim → synthesize Ctrl+V → serve SelectionRequests
+   → on the consumer's data request (+grace): restore prior content, keep serving
+```
+
+Key properties:
+
+- **Focus gate** (`awtfocus.rs`) is the whole reason the earlier global clipboard attempt was
+  abandoned (Ctrl+V is literal-insert in terminals, ANTI-PATTERNS #4). The match is an anchored
+  `WM_CLASS` glob (`*` the only wildcard) against `res_name` or `res_class`, sampled **per
+  keystroke at delivery time** — never cached at a layer boundary, because focus can drift
+  during the lazy keymap remap (a TOCTOU window). It is a strong mitigation, not a guarantee:
+  the synthetic event and the async paste leave a small residual window where focus could move.
+- **Event-driven release** (ANTI-PATTERNS #24): the owner holds the selection until the
+  consumer's data request (`UTF8_STRING`/`STRING`, not a `TARGETS` probe) is answered, then a
+  grace window for re-polls; a hard cap is only a backstop.
+- **Save / restore**: the prior `CLIPBOARD` is fetched before claiming and re-served after the
+  paste is consumed, so the user's clipboard is restored rather than clobbered. Caveat: a
+  clipboard *manager* (e.g. klipper) may still capture the transient emoji into its history,
+  and if the user copies something else mid-delivery it wins (`SelectionClear` drops our state).
+- **Non-fatal**: if the owner thread can't start, non-BMP→AWT silently falls back to the keysym
+  path. If `[non_bmp].clipboard_apps` is unset, the thread isn't spawned and the path is off.
 
 For the exact `config.toml` / `layers.toml` field definitions, see **SCHEMA.md**.
