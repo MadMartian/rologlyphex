@@ -7,7 +7,11 @@ use crate::debug_log;
 
 /// Persistent X11 connection for typing characters via XTest.
 /// Characters are typed via keyboard remapping + XTest key synthesis.
-/// Non-BMP character support is a known limitation; see sdd/ISSUES.md entry D.
+/// Non-BMP characters (U+10000+) always go through the plain keysym encoding here, so
+/// AWT/Java clients (which truncate keysyms above U+FFFF) will render the wrong glyph for
+/// them. The macropad's grab-thread path avoids this by routing non-BMP glyphs to AWT
+/// windows through a clipboard paste instead (see clipserve.rs); this manual `type` path
+/// (driven by the socket server) has no such gating and always uses the keysym path.
 pub struct XTyper {
     display: *mut xlib::Display,
     cache: HashMap<xlib::KeySym, u8>,

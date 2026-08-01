@@ -7,6 +7,7 @@
 | B | 100ms polling latency | Low |
 | D | Non-BMP characters (emoji) produce wrong output in Java/AWT-based applications | Medium |
 | H | Root-context socket discovery is vulnerable to TOCTOU via /run/user/* scan | Medium |
+| I | Ambiguous-width Unicode glyphs (e.g. ℃) misrender cursor position in terminal emulators | Closed |
 
 ## A. Keycode pool depletion across restarts
 
@@ -68,3 +69,17 @@ When Caps Lock is active, characters typed via rologlyphex produce wrong output.
 When `rologlyphex type` is invoked as root (no `XDG_RUNTIME_DIR`), `socket.rs:48-56` scans `/run/user/*/rologlyphex.sock` and connects to the first matching path. Path discovery uses `exists()`, which is a TOCTOU race — a local unprivileged user can plant a socket or symlink at a matching path between the check and the connect. A malicious socket could cause glyph mis-delivery (wrong characters typed) or act as a DoS against root-invoked type commands. Root-to-user privilege boundary is the bounded threat; this does not grant the attacker arbitrary root execution.
 
 **Mitigation**: `lstat` the resolved path and verify `S_ISSOCK` and UID ownership before connecting. Better still, don't invoke the client as root at all — the daemon is a user-session client, so the normal `$XDG_RUNTIME_DIR` path applies and the scan is never reached. (The earlier D-Bus seat0 lookup was removed with keyd retirement.)
+
+## I. Ambiguous-width Unicode glyphs (e.g. ℃) misrender cursor position in terminal emulators
+
+**Severity**: Closed (inherent to terminal/font `wcwidth` handling — confirmed independent of rologlyphex)
+
+Certain Unicode characters — e.g. ℃ (U+2103, DEGREE CELSIUS), mapped on a layer key — fall into Unicode's "Ambiguous" East Asian Width class. A terminal's `wcwidth()` reserves one column for them, but many fonts draw the glyph wider than that column, so the terminal's cursor-position bookkeeping and the drawn glyph disagree. Symptom: the glyph appears half-rendered until the next keystroke redraws it, and the cursor visibly drifts from its real column — easy to mistype nearby text as a result.
+
+Confirmed independent of rologlyphex: the identical glitch reproduces from a plain clipboard paste of ℃, with the daemon entirely out of the loop. The daemon's XTest injection sends one correct `KeyPress`/`KeyRelease` for the character's keysym regardless of how a downstream terminal chooses to lay it out.
+
+**What walls every exit**: the mismatch is between a terminal emulator's column-width table and the width its font actually draws — both live entirely outside this project, and vary per terminal/font combination. No keysym choice, injection timing, or XTest parameter available to rologlyphex affects how a downstream client renders a character it already received correctly.
+
+**Mitigation options**:
+- None available at the rologlyphex layer — this is a terminal/font rendering property, not an input-injection defect.
+- If it recurs often, avoid ambiguous-width glyphs on frequently-used macropad keys, or configure the affected terminal/font to treat ambiguous-width characters as narrow (terminal-specific, outside this project).
