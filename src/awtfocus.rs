@@ -62,7 +62,7 @@ impl AwtDetector {
     pub fn new(display: *mut xlib::Display, patterns: Vec<String>) -> Self {
         // SAFETY: `display` is a live connection; the name is a static NUL-terminated literal.
         let net_active_window = unsafe {
-            xlib::XInternAtom(display, b"_NET_ACTIVE_WINDOW\0".as_ptr() as *const _, xlib::False)
+            xlib::XInternAtom(display, c"_NET_ACTIVE_WINDOW".as_ptr(), xlib::False)
         };
         AwtDetector { patterns, net_active_window }
     }

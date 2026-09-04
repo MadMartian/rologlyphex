@@ -38,17 +38,17 @@ pub fn configure(win: &ApplicationWindow, target_x: i32, target_y: i32) {
          state_skip_taskbar, state_skip_pager, state_sticky,
          wm_user_time, wm_desktop, kde_activities, xa_string) = unsafe {
         (
-            x11::xlib::XInternAtom(xdisplay, b"_NET_WM_WINDOW_TYPE\0".as_ptr() as *const _, 0),
-            x11::xlib::XInternAtom(xdisplay, b"_NET_WM_WINDOW_TYPE_NOTIFICATION\0".as_ptr() as *const _, 0),
-            x11::xlib::XInternAtom(xdisplay, b"_NET_WM_STATE\0".as_ptr() as *const _, 0),
-            x11::xlib::XInternAtom(xdisplay, b"_NET_WM_STATE_ABOVE\0".as_ptr() as *const _, 0),
-            x11::xlib::XInternAtom(xdisplay, b"_NET_WM_STATE_SKIP_TASKBAR\0".as_ptr() as *const _, 0),
-            x11::xlib::XInternAtom(xdisplay, b"_NET_WM_STATE_SKIP_PAGER\0".as_ptr() as *const _, 0),
-            x11::xlib::XInternAtom(xdisplay, b"_NET_WM_STATE_STICKY\0".as_ptr() as *const _, 0),
-            x11::xlib::XInternAtom(xdisplay, b"_NET_WM_USER_TIME\0".as_ptr() as *const _, 0),
-            x11::xlib::XInternAtom(xdisplay, b"_NET_WM_DESKTOP\0".as_ptr() as *const _, 0),
-            x11::xlib::XInternAtom(xdisplay, b"_KDE_NET_WM_ACTIVITIES\0".as_ptr() as *const _, 0),
-            x11::xlib::XInternAtom(xdisplay, b"STRING\0".as_ptr() as *const _, 0),
+            x11::xlib::XInternAtom(xdisplay, c"_NET_WM_WINDOW_TYPE".as_ptr(), 0),
+            x11::xlib::XInternAtom(xdisplay, c"_NET_WM_WINDOW_TYPE_NOTIFICATION".as_ptr(), 0),
+            x11::xlib::XInternAtom(xdisplay, c"_NET_WM_STATE".as_ptr(), 0),
+            x11::xlib::XInternAtom(xdisplay, c"_NET_WM_STATE_ABOVE".as_ptr(), 0),
+            x11::xlib::XInternAtom(xdisplay, c"_NET_WM_STATE_SKIP_TASKBAR".as_ptr(), 0),
+            x11::xlib::XInternAtom(xdisplay, c"_NET_WM_STATE_SKIP_PAGER".as_ptr(), 0),
+            x11::xlib::XInternAtom(xdisplay, c"_NET_WM_STATE_STICKY".as_ptr(), 0),
+            x11::xlib::XInternAtom(xdisplay, c"_NET_WM_USER_TIME".as_ptr(), 0),
+            x11::xlib::XInternAtom(xdisplay, c"_NET_WM_DESKTOP".as_ptr(), 0),
+            x11::xlib::XInternAtom(xdisplay, c"_KDE_NET_WM_ACTIVITIES".as_ptr(), 0),
+            x11::xlib::XInternAtom(xdisplay, c"STRING".as_ptr(), 0),
         )
     };
 

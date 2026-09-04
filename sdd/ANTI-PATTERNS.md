@@ -28,8 +28,19 @@ Coding, functional, and behavioural anti-patterns encountered during development
 | 22 | An `XGrabKey` active grab swallows `XTest` injection done on key press |
 | 23 | Signaling a UI progress indicator *during* a blocking keymap remap never renders it |
 | 24 | Releasing X11 selection ownership on a timeout races the asynchronous paste consumer |
+| 25 | `cargo-generate-rpm` crashes on a hyphenated semver pre-release version |
 
-## 24. Releasing X11 selection ownership on a timeout races the asynchronous paste consumer
+## 25. `cargo-generate-rpm` crashes on a hyphenated semver pre-release version
+
+**Symptom**: `.github/workflows/release.yml` was dry-run tested against a throwaway pre-release tag (`v0.1.0-test.1`). The tarball and `.deb` steps built successfully; the `.rpm` step failed with `invalid version "0.1.0-test.1": contains invalid character (allowed: alphanumeric, '.', '_', '+', '%', '{', '}', '~', '^')`, and the whole job stopped before publishing the GitHub Release.
+
+**What was tried**: Nothing else — the error message named the exact offending character.
+
+**Root cause**: `cargo-generate-rpm` derives the RPM package's `Version` field directly from `Cargo.toml`'s `version`. Cargo/semver allows `-` to introduce a pre-release identifier (e.g. `-rc.1`, `-test.1`), but the RPM version-field grammar does not permit `-` at all — it's reserved as the separator between the RPM `Version` and `Release` fields. Any tag with a semver pre-release suffix (a normal, legal thing to tag — release candidates, betas) would crash this step. `cargo-deb` did not hit this: Debian version fields do allow `-`, so the equivalent case worked there without changes.
+
+**Resolution**: In the `Build .rpm package` step, derive the version from `cargo pkgid` and map `-` to `~` (RPM's own pre-release-ordering character, sorts before the corresponding release) before passing it to `cargo generate-rpm -s "version=\"$RPM_VERSION\""`, overriding the crate version it would otherwise read verbatim.
+
+**Lesson**: A packaging tool that reads a project's version field verbatim is only as permissive as the *target format's* version grammar, not the source ecosystem's — cargo/semver and RPM disagree on `-`, so anything that packages both must translate at the boundary rather than pass the string through. Validate any packaging pipeline against a pre-release-shaped version before trusting it on a plain `X.Y.Z` tag alone; the plain case is exactly the one that can't exercise this class of bug.
 
 **Symptom**: A clipboard-paste injection path (claim `CLIPBOARD`, synthesize Ctrl+V, serve the `SelectionRequest`, then release ownership) delivered the pasted text only intermittently. The same code path worked in some applications and silently dropped the paste in others, with no error — the target field simply stayed empty.
 

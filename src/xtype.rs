@@ -73,7 +73,7 @@ impl XTyper {
 
             if all_empty {
                 self.free_keycodes.push(kc as u8);
-            } else if first_sym >= 0x01000000 && first_sym <= 0x0110FFFF {
+            } else if (0x01000000..=0x0110FFFF).contains(&first_sym) {
                 // Reclaim keycode previously mapped by rologlyphex — pre-populate
                 // cache so this keysym is found instantly without a new mapping slot.
                 self.cache.insert(first_sym, kc as u8);
@@ -182,7 +182,7 @@ impl Drop for XTyper {
 
 fn unicode_to_keysym(ch: char) -> xlib::KeySym {
     let cp = ch as u64;
-    if cp >= 0x20 && cp <= 0xFF {
+    if (0x20..=0xFF).contains(&cp) {
         cp as xlib::KeySym
     } else {
         (0x01000000 + cp) as xlib::KeySym
@@ -216,9 +216,8 @@ impl LayerTyper {
         }
 
         let (scratch, _width) = Self::scan_scratch(display, exclude, logical_keys.len())
-            .map_err(|e| {
+            .inspect_err(|_| {
                 unsafe { xlib::XCloseDisplay(display) };
-                e
             })?;
 
         let index: HashMap<String, u8> = logical_keys

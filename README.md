@@ -1,5 +1,8 @@
 # Rologlyphex
 
+[![CI](https://github.com/MadMartian/rologlyphex/actions/workflows/ci.yml/badge.svg)](https://github.com/MadMartian/rologlyphex/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
 ![Demo](demo.webp)
 
 A Rust GTK4 overlay daemon and Unicode input synthesizer for macropads. A rotary knob cycles through decks of character palettes; a floating overlay shows the active deck and what each button types. Pressing a button types the Unicode character into the focused window via XTest.
@@ -24,6 +27,31 @@ Named after Rolodex + glyphs.
 - A macropad whose keys arrive at the X server as **F13–F24** (e.g. flashed to emit F13–F18; a secondary keyboard's macro keys mapped to F19–F24 by its management daemon). rologlyphex grabs whatever F13–F24 reach X, regardless of source.
 
 ## Install
+
+### From a pre-built package
+
+Download the `.deb`, `.rpm`, or `.tar.gz` for your distribution from the [latest release](https://github.com/MadMartian/rologlyphex/releases/latest), then:
+
+```bash
+# Debian/Ubuntu
+sudo apt install ./rologlyphex_*.deb
+
+# Fedora/RHEL
+sudo dnf install ./rologlyphex-*.rpm
+
+# Generic tarball
+tar xzf rologlyphex-*.tar.gz && cd rologlyphex-*/
+sudo install -Dm755 rologlyphex /usr/bin/rologlyphex
+install -Dm644 rologlyphex.service ~/.config/systemd/user/rologlyphex.service
+```
+
+Then enable the service:
+
+```bash
+systemctl --user enable --now rologlyphex
+```
+
+### From source
 
 ```bash
 make install
