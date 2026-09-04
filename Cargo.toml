@@ -2,6 +2,9 @@
 name = "rologlyphex"
 version = "0.1.0"
 edition = "2021"
+description = "A Rust GTK4 overlay daemon and Unicode input synthesizer for macropads"
+license = "Apache-2.0"
+repository = "https://github.com/MadMartian/rologlyphex"
 
 [dependencies]
 gtk4 = { version = "0.9", features = ["v4_6"] }
@@ -12,3 +15,36 @@ libc = "0.2"
 x11 = { version = "2.21", features = ["xlib", "xtest"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+
+[package.metadata.deb]
+maintainer = "Rologlyphex Contributors"
+copyright = "2026, Rologlyphex Contributors"
+license-file = ["LICENSE", "4"]
+extended-description = """\
+A Rust GTK4 overlay daemon and Unicode input synthesizer for macropads. A \
+rotary knob cycles through decks of character palettes; a floating overlay \
+shows the active deck and what each button types."""
+section = "utils"
+priority = "optional"
+depends = "libgtk-4-1, libx11-6, libxtst6, libxext6"
+assets = [
+    ["target/release/rologlyphex", "usr/bin/", "755"],
+    ["rologlyphex.service", "usr/lib/systemd/user/", "644"],
+    ["README.md", "usr/share/doc/rologlyphex/", "644"],
+    ["NOTICE", "usr/share/doc/rologlyphex/", "644"],
+]
+
+[package.metadata.generate-rpm]
+license = "Apache-2.0"
+assets = [
+    { source = "target/release/rologlyphex", dest = "/usr/bin/rologlyphex", mode = "755" },
+    { source = "rologlyphex.service", dest = "/usr/lib/systemd/user/rologlyphex.service", mode = "644" },
+    { source = "README.md", dest = "/usr/share/doc/rologlyphex/README.md", mode = "644" },
+    { source = "NOTICE", dest = "/usr/share/doc/rologlyphex/NOTICE", mode = "644" },
+]
+
+[package.metadata.generate-rpm.requires]
+gtk4 = "*"
+libX11 = "*"
+libXtst = "*"
+libXext = "*"

@@ -108,10 +108,8 @@ impl LayersConfig {
             let u = name.to_uppercase();
             if logical_set.contains(&u) {
                 Some(u)
-            } else if let Some(l) = phys_to_logical.get(&u) {
-                Some(l.clone())
             } else {
-                None
+                phys_to_logical.get(&u).cloned()
             }
         };
 

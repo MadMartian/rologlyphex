@@ -5,6 +5,8 @@
 - Build with `cargo build --release` for all testing and deployment
 - The binary must compile with zero errors on stable Rust
 - Compiler warnings should be resolved, not suppressed (except temporary `dead_code` for shelved features)
+- `cargo clippy --all-targets -- -D warnings` must pass cleanly; this is enforced in CI (`.github/workflows/ci.yml`) alongside `cargo build --release` and `cargo test`
+- No formatter is enforced (`cargo fmt` is not part of the CI gate) — follow the existing code style
 - Install via `make install`, which builds, copies the binary to `/usr/local/bin/`, and installs the systemd user service
 
 ## Testing
@@ -67,8 +69,15 @@ All data crossing system boundaries must be validated:
 ## Deployment
 
 - The systemd user service file (`rologlyphex.service`) must be kept in sync with CLI flag changes (it must not pass a keyd config path; the daemon now loads `layers.toml`)
-- The Makefile `install` target is the canonical install method
+- The Makefile `install` target is the canonical install method for building from source
 - The daemon runs as a normal user-session X client -- no root, no `input`-group membership, no keyd group is required (the X server delivers the grabbed F13–F24 keys directly)
+
+## Releases
+
+- A release is cut by pushing a `vX.Y.Z` tag; this triggers `.github/workflows/release.yml`, which builds and publishes a `.tar.gz`, a `.deb`, and a `.rpm` to a GitHub Release
+- The tag version must match the `version` field in `Cargo.toml` -- the release workflow fails closed if they diverge
+- Package assets (`[package.metadata.deb]`, `[package.metadata.generate-rpm]` in `Cargo.toml`) install the binary to `/usr/bin/` (not `/usr/local/bin/`, which is reserved for the source-built `make install` path) and the systemd unit to `/usr/lib/systemd/user/`
+- Package runtime dependencies (GTK4, X11, XTest, Xext) must be kept in sync with the CI system-dependency list
 
 ## Privacy and attribution
 
