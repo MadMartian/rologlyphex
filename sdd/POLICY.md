@@ -29,6 +29,14 @@
   3. Pressing buttons on at least two layers (both macropad and secondary-keyboard keys) -- the glyph must appear in the focused window on key release, reliably across repeated presses
   4. Editing `layers.toml` and restarting the daemon -- the new glyph map must take effect
 
+#### Private Display
+It's important to use a display other than the primary one to avoid interfering with the operator, whenever possible:
+ - Use `Xvfb` with a short `XDG_RUNTIME_DIR` path (e.g. `/tmp/rologlyphex/`)
+ - `rologlyphex type` falls back to the real daemon's socket in `/run/user/*` when the isolated one is missing. Always check that the socket exists first.
+ - The isolated daemon needs its own dbus-run-session and `GDK_BACKEND=x11`. A window manager such as *Openbox* is needed for `_NET_ACTIVE_WINDOW`, which the focus gate reads.
+ -  `Xvfb` has no F13–F24 keycodes. Assign them before starting the test daemon.
+ - `rologlyphex type` calls the typer directly and bypasses the focus gate, so drive F-keys through `xdotool key` to test the clipboard path.
+
 ## Input and output sanitization
 
 All data crossing system boundaries must be validated:

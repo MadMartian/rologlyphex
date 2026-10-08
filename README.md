@@ -130,7 +130,8 @@ rologlyphex show          # re-display the overlay in its current state
 ```
 
 > **Note**: emoji and other non-BMP characters (U+10000+) work everywhere via the keysym path
-> *except* Java/AWT apps (e.g. JetBrains IDEs), which truncate them. For those, configure
+> *except* Java/AWT apps (e.g. JetBrains IDEs), which truncate them, and the occasional other
+> app that silently drops them. For those, configure
 > `[non_bmp].clipboard_apps` and they're delivered by clipboard paste instead — see
 > [Emoji in Java/AWT apps](#emoji-in-javaawt-apps).
 
@@ -153,7 +154,7 @@ Only the active layer's ≤10 glyphs are mapped at once, onto a small set of scr
 
 ### Emoji in Java/AWT apps
 
-Java/AWT applications (notably JetBrains IDEs) mangle non-BMP characters (emoji, U+10000+) typed via the normal keysym path — they truncate the keysym and render a wrong CJK glyph. Their *clipboard* path is unaffected, so rologlyphex delivers those glyphs by **paste** instead, but **only when a whitelisted Java/AWT window is focused**. List the apps by `WM_CLASS` glob:
+Java/AWT applications (notably JetBrains IDEs) mangle non-BMP characters (emoji, U+10000+) typed via the normal keysym path — they truncate the keysym and render a wrong CJK glyph. Their *clipboard* path is unaffected, so rologlyphex delivers those glyphs by **paste** instead, but **only when a whitelisted Java/AWT window is focused**. Any other app that drops non-BMP keysyms can be added to the same whitelist; find its class with `xprop WM_CLASS`. List the apps by `WM_CLASS` glob:
 
 ```toml
 [non_bmp]
