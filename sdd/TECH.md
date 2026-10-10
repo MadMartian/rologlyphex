@@ -152,6 +152,10 @@ session; see ANTI-PATTERNS #21). Two modes (`remap_mode`):
   overlay during the (briefly blocking) keymap rebuild.
 - **debounce** -- remap in the idle gap `nav_settle_ms` after the knob settles, no indicator.
 
+The "layer is already mapped" flag is only a belief: `LayerTyper` records the keysyms it
+installed, and before each typed key the grab thread reads the scratch keycodes back
+(`is_current`) and re-arms the remap on any mismatch, healing external keymap rewrites.
+
 ### Non-BMP clipboard routing
 
 Java/AWT (notably JetBrains IDEs) truncates non-BMP keysyms via `(int)(keysym & 0xFFFF)`, so

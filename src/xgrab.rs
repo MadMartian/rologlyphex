@@ -198,6 +198,12 @@ pub fn run(
                 // the focused app. See sdd/ANTI-PATTERNS.md.
                 Some(Action::Type(logical)) if etype == xlib::KeyRelease => {
                     let layer = &ring[idx];
+                    // `pending_remap == false` is only a belief that the X keymap matches the
+                    // layer; verify it against the server before trusting it, and self-heal.
+                    if !pending_remap && !typer.is_current() {
+                        eprintln!("Warning: key-grab: keymap drifted from layer {}; remapping", layer);
+                        pending_remap = true;
+                    }
                     if pending_remap {
                         // In lazy mode the remap happens here, on first press. Raise the
                         // "Please Wait" flag and give the GTK poll time to actually display it

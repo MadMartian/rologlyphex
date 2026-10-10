@@ -1,5 +1,6 @@
 use x11::xlib;
 use x11::xtest;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ptr;
 use std::time::{Duration, Instant};
@@ -200,6 +201,9 @@ pub struct LayerTyper {
     display: *mut xlib::Display,
     /// logical key name -> its dedicated scratch keycode.
     index: HashMap<String, u8>,
+    /// scratch keycode -> keysym `set_layer` last installed (level 0). The authoritative record
+    /// of what the X server *should* hold, compared against reality by `is_current`.
+    expected: RefCell<HashMap<u8, xlib::KeySym>>,
 }
 
 // SAFETY: owns a dedicated Xlib Display connection, used only by the key-grab thread.
@@ -227,7 +231,7 @@ impl LayerTyper {
             .collect();
 
         debug_log!("[🐛DEBUG] LayerTyper: assigned {} scratch keycodes {:?}", index.len(), scratch);
-        Ok(LayerTyper { display, index })
+        Ok(LayerTyper { display, index, expected: RefCell::new(HashMap::new()) })
     }
 
     /// Find `needed` usable scratch keycodes, preferring free (all-NoSymbol) ones, then
@@ -313,6 +317,8 @@ impl LayerTyper {
                 std::slice::from_raw_parts(existing, count as usize * w).to_vec();
             xlib::XFree(existing as *mut _);
 
+            let mut expected = self.expected.borrow_mut();
+            expected.clear();
             for (logical, &kc) in &self.index {
                 let row = (kc - min) as usize * w;
                 let keysym = match glyphs.get(logical) {
@@ -320,6 +326,7 @@ impl LayerTyper {
                     None => xlib::NoSymbol as xlib::KeySym,
                 };
                 syms[row] = keysym;
+                expected.insert(kc, keysym);
                 // Clear higher levels so Shift/etc. can't yield a different glyph.
                 for level in 1..w {
                     syms[row + level] = xlib::NoSymbol as xlib::KeySym;
@@ -333,6 +340,29 @@ impl LayerTyper {
         std::thread::sleep(Duration::from_millis(MAPPING_NOTIFY_SETTLE_MS));
         debug_log!("[🐛DEBUG] set_layer: remapped {} keys over range {}..={} in {:?}",
             self.index.len(), min, max, t0.elapsed());
+    }
+
+    /// Verify the X server's keymap still holds what `set_layer` installed. Something else
+    /// (a keyboard-management daemon, `setxkbmap`, device hotplug, another remapper) can
+    /// rewrite or clear our scratch keycodes behind our back, after which presses silently
+    /// emit nothing. One `XGetKeyboardMapping` round trip; returns `false` on any drift.
+    /// Trivially `true` before the first `set_layer` (nothing installed yet).
+    pub fn is_current(&self) -> bool {
+        let expected = self.expected.borrow();
+        for (&kc, &want) in expected.iter() {
+            let mut n = 0;
+            let got = unsafe { xlib::XGetKeyboardMapping(self.display, kc, 1, &mut n) };
+            if got.is_null() || n <= 0 {
+                return false;
+            }
+            let have = unsafe { *got };
+            unsafe { xlib::XFree(got as *mut _) };
+            if have != want {
+                debug_log!("[🐛DEBUG] is_current: keycode {} holds {:#x}, expected {:#x}", kc, have, want);
+                return false;
+            }
+        }
+        true
     }
 
     /// Fire the scratch keycode bound to `logical` (no remap).

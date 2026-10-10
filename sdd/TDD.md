@@ -145,6 +145,11 @@
 
 ## 4. Overlay window
 
+
+### 3.8 Keymap drift is detected and healed before typing
+- **Given** a layer has been remapped and an external client then rewrites or clears the scratch keycodes
+- **When** a typeable key is released
+- **Then** the daemon detects the mismatch against what it installed, logs a warning, and remaps the active layer before typing, so the glyph appears without needing a knob rotation
 ### 4.1 Overlay appears on layout change
 - **Given** the daemon is running and the overlay is hidden
 - **When** the current layout changes

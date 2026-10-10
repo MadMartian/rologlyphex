@@ -152,6 +152,8 @@ Only the active layer's ≤10 glyphs are mapped at once, onto a small set of scr
 - **lazy** (default) — remap on the first keypress in a layer, with a brief "Please Wait" overlay during the keymap rebuild.
 - **debounce** — remap in the idle gap (`nav_settle_ms`) after the knob settles, no indicator.
 
+Before each keypress the daemon verifies the keymap still holds the active layer's glyphs and remaps automatically if another program (a game, `setxkbmap`, a hotplug) overwrote it.
+
 ### Emoji in Java/AWT apps
 
 Java/AWT applications (notably JetBrains IDEs) mangle non-BMP characters (emoji, U+10000+) typed via the normal keysym path — they truncate the keysym and render a wrong CJK glyph. Their *clipboard* path is unaffected, so rologlyphex delivers those glyphs by **paste** instead, but **only when a whitelisted Java/AWT window is focused**. Any other app that drops non-BMP keysyms can be added to the same whitelist; find its class with `xprop WM_CLASS`. List the apps by `WM_CLASS` glob:
