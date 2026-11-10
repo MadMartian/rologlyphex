@@ -84,7 +84,7 @@ A typeable key not listed in any group renders in an unlabeled group shown first
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `label` | `string` | no | Human title shown in the overlay. Defaults to the layer name in Title Case (e.g. `right_arrows` → `Right Arrows`). |
-| `buttons` | `table<string, string>` | no | Map of logical key name → glyph. The glyph is the character typed when the button is pressed and shown as its overlay legend (first `char` used if multiple). Navigation keys must not appear. Omitted/empty = a navigation-only layer. |
+| `buttons` | `table<string, string>` | no | Map of logical key name → glyph. The glyph is the character typed when the button is pressed and shown as its overlay legend (a single glyph: one base character plus any ZWJ-joined characters, variation selectors, skin-tone modifiers, combining marks or tag characters, e.g. a ZWJ emoji sequence; anything beyond the first glyph is dropped with a warning). Navigation keys must not appear. Omitted/empty = a navigation-only layer. |
 
 **Example:**
 ```toml

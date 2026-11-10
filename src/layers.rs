@@ -71,7 +71,7 @@ pub struct LayersConfig {
     /// Overlay model, keyed by layer name. Buttons are pre-grouped in render order.
     pub overlay: HashMap<String, LayoutInfo>,
     /// Typed character per (layer name, logical key name).
-    pub typing: HashMap<String, HashMap<String, char>>,
+    pub typing: HashMap<String, HashMap<String, String>>,
 }
 
 impl LayersConfig {
@@ -170,7 +170,7 @@ impl LayersConfig {
         for (name, layer) in &raw.layers {
             let label = layer.label.clone().unwrap_or_else(|| derive_label(name));
 
-            let mut key_to_char: HashMap<String, char> = HashMap::new();
+            let mut key_to_char: HashMap<String, String> = HashMap::new();
             let mut key_to_glyph: HashMap<String, String> = HashMap::new();
             for (raw_key, glyph) in &layer.buttons {
                 let logical = match resolve(raw_key) {
@@ -180,10 +180,10 @@ impl LayersConfig {
                         continue;
                     }
                 };
-                match crate::first_char_of(glyph, "layer glyph") {
-                    Some(ch) => {
-                        key_to_char.insert(logical.clone(), ch);
-                        key_to_glyph.insert(logical, glyph.clone());
+                match first_cluster(glyph, "layer glyph") {
+                    Some(cluster) => {
+                        key_to_char.insert(logical.clone(), cluster.to_string());
+                        key_to_glyph.insert(logical, cluster.to_string());
                     }
                     None => {
                         eprintln!("Warning: layer '{}' button '{}' has an empty glyph; ignoring", name, raw_key);
@@ -223,9 +223,50 @@ impl LayersConfig {
     }
 
     /// Character typed for logical key `key` in `layer` (case-insensitive).
-    pub fn glyph_for(&self, layer: &str, key: &str) -> Option<char> {
-        self.typing.get(layer)?.get(&key.to_uppercase()).copied()
+    pub fn glyph_for(&self, layer: &str, key: &str) -> Option<&str> {
+        self.typing.get(layer)?.get(&key.to_uppercase()).map(String::as_str)
     }
+
+    /// Scratch keycodes the typer must claim: the most distinct code points any one layer holds
+    /// (a glyph types as a sequence of per-code-point keycodes, so shared code points such as
+    /// ZWJ cost one keycode per layer, not one per glyph).
+    pub fn max_scratch_needed(&self) -> usize {
+        self.typing
+            .values()
+            .map(|l| l.values().flat_map(|g| g.chars()).collect::<HashSet<char>>().len())
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+/// True for a code point that extends the preceding character into one user-perceived glyph:
+/// ZWJ, variation selectors, emoji skin-tone modifiers, combining marks, the keycap mark, and
+/// tag characters (subdivision flags).
+fn is_cluster_extender(c: char) -> bool {
+    matches!(c as u32,
+        0x200D | 0xFE00..=0xFE0F | 0x1F3FB..=0x1F3FF | 0x0300..=0x036F | 0x20E3 | 0xE0020..=0xE007F)
+}
+
+/// The leading single glyph of `s`: one base character plus its extenders, with every character
+/// after a ZWJ joining the cluster (so `👨‍✈️` is one glyph). Approximates a grapheme cluster
+/// without a segmentation crate; anything beyond the first cluster is dropped with a warning.
+pub fn first_cluster<'a>(s: &'a str, context: &str) -> Option<&'a str> {
+    let mut iter = s.char_indices();
+    iter.next()?;
+    let mut end = s.len();
+    let mut after_zwj = false;
+    for (i, c) in iter {
+        if after_zwj || is_cluster_extender(c) {
+            after_zwj = c == '\u{200D}';
+        } else {
+            end = i;
+            break;
+        }
+    }
+    if end < s.len() {
+        eprintln!("Warning: {} '{}' has extra characters beyond its first glyph, using '{}' only", context, s, &s[..end]);
+    }
+    Some(&s[..end])
 }
 
 /// Title-case a layer name for the default label (`right_arrows` -> `Right Arrows`).
@@ -329,9 +370,9 @@ G1 = "∈"
     fn typing_keyed_by_logical_names() {
         let cfg = LayersConfig::from_str(SAMPLE).unwrap();
         assert_eq!(cfg.layer_order, vec!["main", "symbols"]);
-        assert_eq!(cfg.glyph_for("main", "SL1"), Some('←'));
-        assert_eq!(cfg.glyph_for("main", "G6"), Some('⇦'));
-        assert_eq!(cfg.glyph_for("symbols", "G1"), Some('∈'));
+        assert_eq!(cfg.glyph_for("main", "SL1"), Some("←"));
+        assert_eq!(cfg.glyph_for("main", "G6"), Some("⇦"));
+        assert_eq!(cfg.glyph_for("symbols", "G1"), Some("∈"));
         // F-keys are not internal identifiers
         assert_eq!(cfg.glyph_for("main", "F13"), None);
     }
@@ -369,7 +410,7 @@ A = "←"
         .unwrap();
         assert_eq!(cfg.nav_prev, "F17"); // lowercase normalized
         assert_eq!(cfg.nav_next, "F19");
-        assert_eq!(cfg.glyph_for("x", "A"), Some('←'));
+        assert_eq!(cfg.glyph_for("x", "A"), Some("←"));
     }
 
     #[test]
@@ -446,7 +487,7 @@ F13 = "←"
 "#,
         )
         .unwrap();
-        assert_eq!(cfg.glyph_for("x", "SL1"), Some('←'));
+        assert_eq!(cfg.glyph_for("x", "SL1"), Some("←"));
         // not addressable by physical key past config
         assert_eq!(cfg.glyph_for("x", "F13"), None);
     }
@@ -470,5 +511,24 @@ A = "z"
 "#,
         )
         .is_err());
+    }
+
+    #[test]
+    fn zwj_sequence_is_one_glyph() {
+        let man_pilot = "\u{1F468}\u{200D}\u{2708}\u{FE0F}";
+        assert_eq!(first_cluster(man_pilot, "t"), Some(man_pilot));
+        // A skin-tone modifier and a following unrelated glyph: only the first cluster survives.
+        assert_eq!(first_cluster("\u{1F44D}\u{1F3FD}x", "t"), Some("\u{1F44D}\u{1F3FD}"));
+        assert_eq!(first_cluster("ab", "t"), Some("a"));
+        assert_eq!(first_cluster("", "t"), None);
+    }
+
+    #[test]
+    fn sequence_glyph_loads_whole_and_scratch_counts_distinct_code_points() {
+        let toml = "[keys]\nF13 = \"SL1\"\nF14 = \"SL2\"\n[layers.x.buttons]\nSL1 = \"\u{1F468}\u{200D}\u{2708}\u{FE0F}\"\nSL2 = \"\u{1F469}\u{200D}\u{2708}\u{FE0F}\"\n";
+        let cfg = LayersConfig::from_str(&format!("layer_order = [\"x\"]\n{toml}")).unwrap();
+        assert_eq!(cfg.glyph_for("x", "SL1"), Some("\u{1F468}\u{200D}\u{2708}\u{FE0F}"));
+        // 👨 👩 ZWJ ✈ VS16 — ZWJ/✈/VS16 are shared between the two glyphs.
+        assert_eq!(cfg.max_scratch_needed(), 5);
     }
 }

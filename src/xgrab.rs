@@ -123,8 +123,7 @@ pub fn run(
     // Batch-remap typist. Exclude the grabbed keycodes from its scratch pool so it never
     // remaps a key we are grabbing (notably F24 = keycode 202, which carries U2764; see #14).
     let exclude: HashSet<u8> = actions.keys().copied().collect();
-    let logical_keys: Vec<String> = cfg.phys_to_logical.values().cloned().collect();
-    let typer = LayerTyper::open(&logical_keys, &exclude)?;
+    let typer = LayerTyper::open(cfg.max_scratch_needed(), &exclude)?;
 
     // Non-BMP clipboard routing: classify the focused window against the WM_CLASS whitelist.
     // The check is sampled per keystroke at delivery time (below), not cached at a layer
@@ -153,7 +152,7 @@ pub fn run(
     // is deferred to the first keypress in the new layer, so spinning the knob never blocks
     // the event loop and the overlay never lags behind it.
     let ring = &cfg.layer_order;
-    let empty: HashMap<String, char> = HashMap::new();
+    let empty: HashMap<String, String> = HashMap::new();
     let mut idx: usize = 0;
     let mut pending_remap = true;
     publish_layer(&current_layout, &ring[idx]);
@@ -226,24 +225,24 @@ pub fn run(
                     // glyphs, and non-BMP into non-AWT apps — takes the working keysym path.
                     // Focus is sampled HERE, at delivery, after the remap above has settled.
                     match cfg.glyph_for(layer, logical) {
-                        Some(ch) if (ch as u32) > 0xFFFF => {
+                        Some(glyph) if glyph.chars().any(|c| (c as u32) > 0xFFFF) => {
                             // Only check focus when the clipboard path exists (avoids the X
                             // round-trip otherwise); the filter closure runs only on Some.
                             match clipboard.as_ref().filter(|_| awt.focused_is_awt(display)) {
                                 Some(cs) => {
                                     debug_log!("[🐛DEBUG] {} -> '{}' (U+{:04X}) non-BMP into AWT: clipboard paste",
-                                        logical, ch, ch as u32);
-                                    cs.paste(&ch.to_string());
+                                        logical, glyph, glyph.chars().next().map_or(0, |c| c as u32));
+                                    cs.paste(glyph);
                                 }
                                 None => {
                                     debug_log!("[🐛DEBUG] {} -> '{}' (U+{:04X}) non-BMP: keysym path",
-                                        logical, ch, ch as u32);
+                                        logical, glyph, glyph.chars().next().map_or(0, |c| c as u32));
                                     typer.press(logical);
                                 }
                             }
                         }
-                        Some(ch) => {
-                            debug_log!("[🐛DEBUG] {} -> '{}' (layer {})", logical, ch, layer);
+                        Some(glyph) => {
+                            debug_log!("[🐛DEBUG] {} -> '{}' (layer {})", logical, glyph, layer);
                             typer.press(logical);
                         }
                         None => {

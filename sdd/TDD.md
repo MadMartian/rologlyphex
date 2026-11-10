@@ -106,6 +106,11 @@
 - **When** the config is loaded
 - **Then** unknown entries are skipped with a warning and an empty ring is a fatal error; a layer with no `label` defaults to its name in Title Case
 
+### 2.8 A multi-code-point glyph loads as one glyph
+- **Given** a layer button whose glyph is a ZWJ emoji sequence (e.g. a man, ZWJ, an airplane, VS16)
+- **When** the config is loaded
+- **Then** the whole sequence is kept as that button's glyph (not truncated to its first character); characters beyond the first glyph are dropped with a warning
+
 ## 3. Key input & layer ring
 
 ### 3.1 Knob navigates the layer ring
@@ -302,6 +307,11 @@
 - **When** an Xlib call triggers a recoverable protocol error (e.g. `BadAccess` from `XGrabKey` when another client holds a key, or `BadWindow` on a destroyed overlay)
 - **Then** the daemon logs the error details and continues running rather than `exit()`-ing, and the daemon socket remains served
 
+### 5.9 A multi-code-point glyph types its code points in order without a per-press remap
+- **Given** the active layer holds a ZWJ sequence glyph and its code points are mapped in the layer's single batch remap
+- **When** its button is released
+- **Then** the sequence's code points are delivered in order (shared code points such as ZWJ reusing one scratch keycode) with no `XChangeKeyboardMapping` call
+
 ## 6. Socket IPC
 
 ### 6.1 Socket created on daemon startup
@@ -399,3 +409,8 @@
 - **Given** a non-BMP glyph is pressed while a whitelisted Java/AWT app is focused
 - **When** the glyph is delivered (on key release, after any pending keymap remap has completed)
 - **Then** the clipboard-vs-keysym decision reflects the window focused at delivery time, not the window focused at an earlier layer switch
+
+### 9.7 A glyph with any non-BMP code point routes as non-BMP
+- **Given** a multi-code-point glyph containing at least one code point above U+FFFF and a whitelisted Java/AWT app focused
+- **When** its button is released
+- **Then** the entire sequence is delivered in one clipboard paste, not code point by code point

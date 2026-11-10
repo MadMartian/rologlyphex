@@ -199,8 +199,11 @@ fn unicode_to_keysym(ch: char) -> xlib::KeySym {
 /// scratch keycode: no remap, no MappingNotify.
 pub struct LayerTyper {
     display: *mut xlib::Display,
-    /// logical key name -> its dedicated scratch keycode.
-    index: HashMap<String, u8>,
+    /// The scratch keycode pool, ascending. Each keycode holds one *code point* of the active
+    /// layer; a glyph is typed as a sequence of them, so a ZWJ sequence needs no extra remap.
+    pool: Vec<u8>,
+    /// logical key name -> the scratch keycodes to fire, in order, to type its glyph.
+    sequences: RefCell<HashMap<String, Vec<u8>>>,
     /// scratch keycode -> keysym `set_layer` last installed (level 0). The authoritative record
     /// of what the X server *should* hold, compared against reality by `is_current`.
     expected: RefCell<HashMap<u8, xlib::KeySym>>,
@@ -210,28 +213,29 @@ pub struct LayerTyper {
 unsafe impl Send for LayerTyper {}
 
 impl LayerTyper {
-    /// Open a dedicated display and assign each logical key a scratch keycode. `exclude` lists
+    /// Open a dedicated display and claim `needed` scratch keycodes — the most distinct code
+    /// points any single layer holds (`LayersConfig::max_scratch_needed`). `exclude` lists
     /// keycodes that must never be used (the grabbed F13–F24 keycodes — one of which, F24,
     /// carries the Unicode keysym U2764 and would otherwise be reclaimed; see #14).
-    pub fn open(logical_keys: &[String], exclude: &HashSet<u8>) -> Result<Self, String> {
+    pub fn open(needed: usize, exclude: &HashSet<u8>) -> Result<Self, String> {
         let display = unsafe { xlib::XOpenDisplay(ptr::null()) };
         if display.is_null() {
             return Err("LayerTyper: cannot open X11 display".to_string());
         }
 
-        let (scratch, _width) = Self::scan_scratch(display, exclude, logical_keys.len())
+        let (mut pool, _width) = Self::scan_scratch(display, exclude, needed.max(1))
             .inspect_err(|_| {
                 unsafe { xlib::XCloseDisplay(display) };
             })?;
 
-        let index: HashMap<String, u8> = logical_keys
-            .iter()
-            .cloned()
-            .zip(scratch.iter().copied())
-            .collect();
-
-        debug_log!("[🐛DEBUG] LayerTyper: assigned {} scratch keycodes {:?}", index.len(), scratch);
-        Ok(LayerTyper { display, index, expected: RefCell::new(HashMap::new()) })
+        pool.sort_unstable();
+        debug_log!("[🐛DEBUG] LayerTyper: assigned {} scratch keycodes {:?}", pool.len(), pool);
+        Ok(LayerTyper {
+            display,
+            pool,
+            sequences: RefCell::new(HashMap::new()),
+            expected: RefCell::new(HashMap::new()),
+        })
     }
 
     /// Find `needed` usable scratch keycodes, preferring free (all-NoSymbol) ones, then
@@ -295,13 +299,38 @@ impl LayerTyper {
     /// This is critical: issuing one `XChangeKeyboardMapping` per scratch keycode produced a
     /// `MappingNotify` storm that forced every X client to reprocess the keymap, degrading
     /// whole-system performance (mouse, scrolling). See sdd/ANTI-PATTERNS.md.
-    pub fn set_layer(&self, glyphs: &HashMap<String, char>) {
-        if self.index.is_empty() {
+    pub fn set_layer(&self, glyphs: &HashMap<String, String>) {
+        if self.pool.is_empty() {
             return;
         }
         let t0 = Instant::now();
-        let min = *self.index.values().min().unwrap();
-        let max = *self.index.values().max().unwrap();
+
+        // Give each distinct code point of the layer one scratch keycode (stable order, so the
+        // assignment is deterministic). A glyph then types as the keycodes of its code points.
+        let mut keys: Vec<&String> = glyphs.keys().collect();
+        keys.sort();
+        let mut slot: HashMap<char, u8> = HashMap::new();
+        let mut sequences: HashMap<String, Vec<u8>> = HashMap::new();
+        'glyphs: for logical in keys {
+            let mut seq = Vec::new();
+            for ch in glyphs[logical].chars() {
+                if !slot.contains_key(&ch) {
+                    match self.pool.get(slot.len()) {
+                        Some(&kc) => { slot.insert(ch, kc); }
+                        None => {
+                            eprintln!("Warning: scratch keycode pool ({}) exhausted; '{}' will not type", self.pool.len(), logical);
+                            continue 'glyphs;
+                        }
+                    }
+                }
+                seq.push(slot[&ch]);
+            }
+            sequences.insert(logical.clone(), seq);
+        }
+        let by_kc: HashMap<u8, char> = slot.iter().map(|(&c, &k)| (k, c)).collect();
+
+        let min = self.pool[0];
+        let max = *self.pool.last().unwrap();
         let count = max as i32 - min as i32 + 1;
 
         unsafe {
@@ -319,9 +348,9 @@ impl LayerTyper {
 
             let mut expected = self.expected.borrow_mut();
             expected.clear();
-            for (logical, &kc) in &self.index {
+            for &kc in &self.pool {
                 let row = (kc - min) as usize * w;
-                let keysym = match glyphs.get(logical) {
+                let keysym = match by_kc.get(&kc) {
                     Some(&ch) => unicode_to_keysym(ch),
                     None => xlib::NoSymbol as xlib::KeySym,
                 };
@@ -336,10 +365,11 @@ impl LayerTyper {
             xlib::XChangeKeyboardMapping(self.display, min as i32, w as i32, syms.as_ptr() as *mut _, count);
             xlib::XSync(self.display, xlib::False);
         }
+        *self.sequences.borrow_mut() = sequences;
         // Let clients process the single MappingNotify before the next keypress (#9).
         std::thread::sleep(Duration::from_millis(MAPPING_NOTIFY_SETTLE_MS));
-        debug_log!("[🐛DEBUG] set_layer: remapped {} keys over range {}..={} in {:?}",
-            self.index.len(), min, max, t0.elapsed());
+        debug_log!("[🐛DEBUG] set_layer: remapped {} code points over range {}..={} in {:?}",
+            slot.len(), min, max, t0.elapsed());
     }
 
     /// Verify the X server's keymap still holds what `set_layer` installed. Something else
@@ -365,12 +395,14 @@ impl LayerTyper {
         true
     }
 
-    /// Fire the scratch keycode bound to `logical` (no remap).
+    /// Type `logical`'s glyph: fire its code points' scratch keycodes in order (no remap).
     pub fn press(&self, logical: &str) {
-        if let Some(&kc) = self.index.get(logical) {
+        if let Some(seq) = self.sequences.borrow().get(logical) {
             unsafe {
-                xtest::XTestFakeKeyEvent(self.display, kc as u32, xlib::True, 0);
-                xtest::XTestFakeKeyEvent(self.display, kc as u32, xlib::False, 0);
+                for &kc in seq {
+                    xtest::XTestFakeKeyEvent(self.display, kc as u32, xlib::True, 0);
+                    xtest::XTestFakeKeyEvent(self.display, kc as u32, xlib::False, 0);
+                }
                 xlib::XFlush(self.display);
             }
         }

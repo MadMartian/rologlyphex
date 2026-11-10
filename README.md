@@ -15,7 +15,7 @@ Named after Rolodex + glyphs.
 - **Self-contained input** — grabs the macropad function keys (F13–F24) directly at the X11 level, owns the layer ring, and types each layer's glyph itself. No keyd or other remapping daemon, and it runs as a normal user-session client (no root)
 - **Reliable Unicode input** — types into the focused X11 window via XTest + keyboard remapping (no xdotool, no compose-file fragility)
 - **Emoji in Java/AWT apps** — non-BMP glyphs that JetBrains IDEs would otherwise mangle are delivered by a focus-gated clipboard paste, with your prior clipboard saved and restored (opt-in via `[non_bmp].clipboard_apps`)
-- **Simple glyph map** — `layers.toml` maps friendly key aliases to glyphs per layer, with global key groups for the overlay (see [`sdd/SCHEMA.md`](sdd/SCHEMA.md))
+- **Simple glyph map** — `layers.toml` maps friendly key aliases to glyphs per layer (including multi-character ZWJ emoji sequences such as 👨‍✈️), with global key groups for the overlay (see [`sdd/SCHEMA.md`](sdd/SCHEMA.md))
 - **Configurable** — target monitor and overlay corner; lazy vs. debounce keymap-remap modes; persistent `~/.config/rologlyphex/config.toml`
 - **Agent-Ready Documentation** — Following Spec-Driven Development (SDD), all technical specs and behavioral contracts live in `sdd/`. `AGENTS.md` provides an entry point for AI contributors.
 

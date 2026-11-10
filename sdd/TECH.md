@@ -6,7 +6,7 @@ rologlyphex owns the macropad experience end-to-end: it grabs the device functio
 the X11 level, runs the layer-ring state machine, and types each layer's glyph via XTest.
 keyd has been retired; rologlyphex owns input, layers, typing, and UI end-to-end.
 
-Most glyphs type via the keysym path. Non-BMP glyphs (emoji, U+10000+) destined for a focused
+Most glyphs type via the keysym path. Non-BMP glyphs (emoji, U+10000+; a multi-code-point glyph counts as non-BMP if any code point is) destined for a focused
 Java/AWT window are the exception: AWT truncates non-BMP keysyms, so those are delivered via a
 focus-gated clipboard paste served by a dedicated owner thread (see *Non-BMP clipboard
 routing* below).
@@ -108,7 +108,7 @@ The application crosses two FFI boundaries not covered by crate bindings:
 | `monitor.rs` | main | `MonitorGeometry`, the `Corner` enum (parse, header alignment, per-corner placement), monitor selection (connector/model/index → rightmost fallback), desktop-center |
 | `wmprops.rs` | main | X11 window-manager property configuration (EWMH `_NET_WM_*`) via direct Xlib FFI — notification type, above/sticky/all-desktops, focus-less, and window move |
 | `xgrab.rs` | key-grab | `XGrabKey` F13–F24, poll-based event loop, layer-ring state machine, debounce/lazy remap scheduling, drives `LayerTyper`, publishes the active layer name and the "Please Wait" flag |
-| `xtype.rs` | key-grab + socket server | `LayerTyper` (batch per-layer keycode remap for the grab thread) and `XTyper` (per-glyph remap + LRU for the socket server's manual `type`); both with their own Xlib `Display` |
+| `xtype.rs` | key-grab + socket server | `LayerTyper` (batch per-layer keycode remap for the grab thread; one scratch keycode per distinct *code point* in the layer, a glyph typing as its code points' keycodes in order, so ZWJ sequences need no per-press remap) and `XTyper` (per-glyph remap + LRU for the socket server's manual `type`); both with their own Xlib `Display` |
 | `awtfocus.rs` | key-grab | Focus-gated AWT detection: reads `_NET_ACTIVE_WINDOW` (managed top-level) + `XGetClassHint`, matches `WM_CLASS` against the `[non_bmp].clipboard_apps` anchored-glob whitelist. Sampled per keystroke at delivery to decide whether a non-BMP glyph routes to the clipboard |
 | `clipserve.rs` | clipboard-owner | Persistent `CLIPBOARD` owner with its own `Display`: on a paste it saves the prior selection, claims ownership, synthesizes Ctrl+V, serves the `SelectionRequest` protocol with **event-driven** release, then restores and keeps serving the saved content until `SelectionClear`. Receives glyphs from the grab thread over an `mpsc` channel |
 | `xerror.rs` | process-global | Installs non-fatal `XSetErrorHandler` / `XSetIOErrorHandler` so X protocol errors (e.g. `BadAccess` from `XGrabKey`) log and continue instead of `exit()`-ing |
@@ -143,7 +143,7 @@ channel: `mpsc::Sender<String>` for glyphs (grab → clipboard-owner).
 
 ### Remap scheduling
 
-Only the active layer's ≤10 glyphs are mapped at a time, onto a fixed set of scratch keycodes
+Only the active layer's glyphs (their distinct code points) are mapped at a time, onto a fixed set of scratch keycodes
 (`LayerTyper`), and the whole set is rebuilt in a **single** `XChangeKeyboardMapping` per layer
 change — never per keypress, and never mid-spin (a `MappingNotify` storm degrades the whole X
 session; see ANTI-PATTERNS #21). Two modes (`remap_mode`):
@@ -166,7 +166,7 @@ path.
 
 ```
 key release (grab thread)
-      │  glyph is non-BMP (> U+FFFF)?
+      │  glyph has a non-BMP (> U+FFFF) code point?
       ▼
  awtfocus: focused WM_CLASS ∈ [non_bmp].clipboard_apps ?   ── no ──► keysym path (press)
       │ yes                                                              (terminals, GTK, …)
